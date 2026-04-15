@@ -1,0 +1,20 @@
+[project]
+name = "thesis-project"
+version = "0.1.0"
+description = "Privacy-focused agentic AI workflow for technical debt remediation using locally deployable language models"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [
+    { name = "Abhishek Roy" }
+]
+keywords = ["technical-debt", "agentic-ai", "llm", "sonarqube", "refactoring"]
+dependencies = [
+    "langgraph",
+    "openai",
+    "tree-sitter",
+    "pysqlite3",
+    "pandas>=3.0.2",
+    "ipykernel>=7.2.0",
+]
+
