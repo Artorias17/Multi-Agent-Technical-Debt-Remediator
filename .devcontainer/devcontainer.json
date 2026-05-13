@@ -1,15 +1,13 @@
 {
   "name": "Thesis",
-  "image": "mcr.microsoft.com/devcontainers/base:alpine-3.22",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "python",
+  "workspaceFolder": "/workspace/thesis",
+  "forwardPorts": [9000, 9092, 5432],
   "features": {
-    "ghcr.io/shyim/devcontainers-features/bun:0": {},
-		"ghcr.io/cirolosapio/devcontainers-features/alpine-git:0": {},
-		"ghcr.io/va-h/devcontainers-features/uv:1": {
-			"shellautocompletion": true,
-			"version": "latest"
-		}
+    "ghcr.io/cirolosapio/devcontainers-features/alpine-bash:0": {},
+    "ghcr.io/cirolosapio/devcontainers-features/alpine-git:0": {}
   },
-  "runArgs": ["--gpus=all"],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -17,6 +15,7 @@
         "ms-python.python",
         "ms-python.vscode-pylance",
         "github.copilot",
+        "anthropic.claude-code",
         "eamodio.gitlens",
         "ms-python.debugpy",
         "ms-toolsai.jupyter",
@@ -37,5 +36,6 @@
         "python.terminal.activateEnvironment": true
       }
     }
-  }
+  },
+  "postCreateCommand": "pip install uv"
 }
