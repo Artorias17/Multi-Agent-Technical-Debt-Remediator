@@ -1,10 +1,9 @@
 import ast
 import json
-import subprocess
-import tempfile
 from pathlib import Path
 
-from agents.llm import get_client, MODEL
+import whatthepatch
+from agents.llm import get_client, MODEL, debug_response
 from state import PipelineState
 
 _SYSTEM = (
@@ -36,24 +35,61 @@ def _format_issues(issues: list[dict]) -> str:
     )
 
 
-def _apply_diff_to_temp(full_code: str, diff: str) -> tuple[bool, str, str]:
+def _apply_diff_to_temp(source: str, diff: str) -> tuple[bool, str, str]:
     """
-    Apply diff to a temp copy of the file.
+    Apply diff to source in memory using whatthepatch.
     Returns (success, patched_content, error_message).
     """
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        target = Path(tmp_dir) / "file.tmp"
-        target.write_text(full_code, encoding="utf-8")
+    try:
+        patches = list(whatthepatch.parse_patch(diff))
+        if not patches:
+            return False, "", "No patches found in diff"
 
-        result = subprocess.run(
-            ["patch", "-u", str(target)],
-            input=diff.encode(),
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            return False, "", result.stderr.decode()
+        text = source
+        for patch in patches:
+            if not patch.changes:
+                continue
+            result = whatthepatch.apply_diff(patch, text)
+            if result is None:
+                return False, "", "Patch did not apply cleanly (context mismatch)"
+            text = "".join(result)
 
-        return True, target.read_text(encoding="utf-8"), ""
+        return True, text, ""
+    except Exception as exc:
+        return False, "", str(exc)
+
+
+def _extract_function(source: str, language: str, fn_name: str) -> str:
+    """Extract named function from source using tree-sitter. Falls back to full source."""
+    from agents.context_agent import _LANGUAGE_CONFIG
+    from tree_sitter import Parser
+
+    cfg = _LANGUAGE_CONFIG.get(language)
+    if cfg is None:
+        return source
+
+    source_bytes = source.encode("utf-8")
+    parser = Parser(cfg["language"])
+    tree = parser.parse(source_bytes)
+    fn_node_types = cfg["function_nodes"]
+
+    def walk(node):
+        if node.type in fn_node_types:
+            for child in node.children:
+                if child.type == "identifier":
+                    name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                    if name == fn_name:
+                        return node
+        for child in node.children:
+            result = walk(child)
+            if result is not None:
+                return result
+        return None
+
+    node = walk(tree.root_node)
+    if node is None:
+        return source
+    return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
 
 def _syntax_check(patched_code: str, language: str) -> tuple[bool, str]:
@@ -70,6 +106,7 @@ def _syntax_check(patched_code: str, language: str) -> tuple[bool, str]:
 
     from agents.context_agent import _LANGUAGE_CONFIG
     from tree_sitter import Parser
+
     cfg = _LANGUAGE_CONFIG.get(language)
     if cfg is None:
         return True, ""  # unknown language — skip
@@ -129,10 +166,13 @@ def validation_node(state: PipelineState) -> dict:
 
     issues = state["current_issues"]
 
-    print(f"[Validation] Applying patch to temp copy of {ctx['file_path']}")
+    # Diffs use full-file line numbers, so apply against the full evolving file.
+    current_code = state.get("current_code") or ctx["full_code"]
+
+    print(f"[Validation] Applying patch to {ctx['file_path']}")
 
     # ── Phase 1: structural check (patch applies cleanly) ────
-    ok, patched_code, err = _apply_diff_to_temp(ctx["full_code"], diff)
+    ok, patched_code, err = _apply_diff_to_temp(current_code, diff)
     if not ok:
         print(f"[Validation] Patch failed to apply: {err.strip()}")
         return {
@@ -143,9 +183,17 @@ def validation_node(state: PipelineState) -> dict:
             "last_event": "validation_failed",
         }
 
-    # ── Phase 0: syntax check ─────────────────────────────────
+    # Extract just the patched function for review (by name, not line slice)
+    functions = ctx.get("functions", [])
+    fn = functions[0] if functions else None
+    if fn:
+        patched_fn = _extract_function(patched_code, language, fn["name"])
+    else:
+        patched_fn = patched_code
+
+    # ── Phase 0: syntax check (on patched function) ──────────
     print(f"[Validation] Running syntax check ({language})")
-    syntax_ok, syntax_err = _syntax_check(patched_code, language)
+    syntax_ok, syntax_err = _syntax_check(patched_fn, language)
     if not syntax_ok:
         print(f"[Validation] Syntax check FAILED: {syntax_err}")
         return {
@@ -156,33 +204,40 @@ def validation_node(state: PipelineState) -> dict:
             "last_event": "validation_failed",
         }
 
-    # ── Phase 2: semantic LLM review ─────────────────────────
+    # ── Phase 2: semantic LLM review (on patched function) ───
     print("[Validation] Running semantic review")
     client = get_client()
     resp = client.chat.completions.create(
         model=MODEL,
         messages=[
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _USER.format(
-                issues=_format_issues(issues),
-                patched_code=patched_code,
-            )},
+            {
+                "role": "user",
+                "content": _USER.format(
+                    issues=_format_issues(issues),
+                    patched_code=patched_fn,
+                ),
+            },
         ],
         temperature=0.1,
     )
 
+    debug_response("Validation", resp.choices[0].message.content)
     try:
         result = _parse_json(resp.choices[0].message.content)
-    except (json.JSONDecodeError, KeyError):
+    except json.JSONDecodeError, KeyError:
         result = {"passed": False, "reason": "Could not parse semantic review response"}
 
     passed = result.get("passed", False)
-    print(f"[Validation] {'PASSED' if passed else 'FAILED'}: {result.get('reason', '')}")
+    print(
+        f"[Validation] {'PASSED' if passed else 'FAILED'}: {result.get('reason', '')}"
+    )
 
     if passed:
         return {
             "validation": result,
             "patched_code": patched_code,
+            "current_code": patched_code,
             "last_event": "validation_passed",
         }
     return {

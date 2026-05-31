@@ -14,6 +14,7 @@ SEVERITY_WEIGHT = {
 
 # ── Chunk building ───────────────────────────────────────────
 
+
 # TODO: Update priority formula once the new dataset provides per-file
 # cognitive_complexity and line_coverage. Current formula uses only
 # fields present in the issue list (severity, effort_minutes, count).
@@ -87,7 +88,7 @@ def _build_rule_cache(report: dict) -> dict[str, str | None]:
 
 
 def _reset_chunk_state() -> dict:
-    """Clear per-chunk working state before dispatching a new chunk."""
+    """Clear all per-chunk and per-function state when dispatching a new chunk."""
     return {
         "attempt": 0,
         "current_file": "",
@@ -98,13 +99,36 @@ def _reset_chunk_state() -> dict:
         "patched_code": None,
         "validation": None,
         "rejection_history": [],
+        "function_index": 0,
+        "functions_to_process": [],
+        "current_code": "",
+        "remediation_status": None,
+        "remediation_reason": None,
+        "new_functions": [],
     }
 
 
-# ── Routing helper ───────────────────────────────────────────
+def _reset_function_state() -> dict:
+    """Clear per-function attempt state when advancing to the next function."""
+    return {
+        "attempt": 0,
+        "summary": None,
+        "diff": None,
+        "patched_code": None,
+        "validation": None,
+        "rejection_history": [],
+        "remediation_status": None,
+        "remediation_reason": None,
+        "new_functions": [],
+    }
 
 
-def _next_chunk_or_finalize(state: dict, current_index: int, chunks: list) -> dict:
+# ── Routing helpers ───────────────────────────────────────────
+
+
+def _next_chunk_or_finalize(
+    state: PipelineState, current_index: int, chunks: list
+) -> dict:
     next_index = current_index + 1
 
     if next_index >= len(chunks):
@@ -120,11 +144,42 @@ def _next_chunk_or_finalize(state: dict, current_index: int, chunks: list) -> di
     )
 
     return {
+        **_reset_chunk_state(),
         "chunk_index": next_index,
         "current_file": next_chunk["file"],
         "current_issues": next_chunk["issues"],
         "next_agent": "context",
-        **_reset_chunk_state(),
+    }
+
+
+def _advance_function(state: PipelineState) -> dict:
+    """
+    Move to the next function in the current chunk.
+    If all functions are done, route to documentation.
+    """
+    functions_to_process = state.get("functions_to_process", [])
+    next_index = state.get("function_index", 0) + 1
+
+    if next_index >= len(functions_to_process):
+        print("[Orchestrator] All functions processed — routing to documentation")
+        return {**_reset_function_state(), "next_agent": "documentation"}
+
+    next_entry = functions_to_process[next_index]
+    fn = next_entry["fn"]
+    issues = next_entry["issues"]
+    current_context = state.get("context") or {}
+
+    print(
+        f"[Orchestrator] Advancing to function {next_index}: "
+        f"`{fn['name']}` ({len(issues)} issue(s))"
+    )
+
+    return {
+        **_reset_function_state(),
+        "function_index": next_index,
+        "current_issues": issues,
+        "context": {**current_context, "functions": [fn]},
+        "next_agent": "summarizer",
     }
 
 
@@ -133,11 +188,12 @@ def _next_chunk_or_finalize(state: dict, current_index: int, chunks: list) -> di
 
 def route_orchestrator(state: dict) -> str:
     return {
-        "vcs_setup":     "vcs_setup",
-        "context":       "context_agent",
-        "remediation":   "remediation_agent",
+        "vcs_setup": "vcs_setup",
+        "context": "context_agent",
+        "summarizer": "summarizer_agent",
+        "remediation": "remediation_agent",
         "documentation": "documentation_agent",
-        "finalize":      "vcs_finalize",
+        "finalize": "vcs_finalize",
     }.get(state.get("next_agent", "vcs_setup"), "vcs_setup")
 
 
@@ -180,6 +236,7 @@ def orchestrator_node(state: PipelineState) -> dict:
         )
 
         return {
+            **_reset_chunk_state(),
             "chunks": chunks,
             "chunk_index": 0,
             "rule_cache": rule_cache,
@@ -187,27 +244,53 @@ def orchestrator_node(state: PipelineState) -> dict:
             "current_issues": first_chunk["issues"],
             "next_agent": "context",
             "last_event": None,
-            **_reset_chunk_state(),
         }
 
     chunks = state["chunks"]
     chunk_index = state["chunk_index"]
     current = chunks[chunk_index]
 
-    # ── Validation passed → send to documentation ────────────
+    # ── Context ready → start function loop ──────────────────
+    if event == "context_ready":
+        functions_to_process = state.get("functions_to_process", [])
+        file_name = Path(current["file"]).name
+
+        if not functions_to_process:
+            print(
+                f"[Orchestrator] No processable functions in {file_name} — skipping chunk"
+            )
+            return {
+                **_next_chunk_or_finalize(state, chunk_index, chunks),
+                "last_event": None,
+            }
+
+        first = functions_to_process[0]
+        print(
+            f"[Orchestrator] Starting function 0: "
+            f"`{first['fn']['name']}` ({len(first['issues'])} issue(s)) in {file_name}"
+        )
+        return {"next_agent": "summarizer", "last_event": None}
+
+    # ── Validation passed → advance to next function (or docs)
     if event == "validation_passed":
         attempt = state.get("attempt", 0)
+        fn_name = ((state.get("context") or {}).get("functions") or [{}])[0].get(
+            "name", "?"
+        )
         print(
             f"[Orchestrator] Validation PASSED on attempt {attempt} "
-            f"({Path(current['file']).name}) — routing to documentation"
+            f"(`{fn_name}`) — advancing"
         )
-        return {"next_agent": "documentation"}
+        return {**_advance_function(state), "last_event": None}
 
-    # ── Validation failed → retry or exhaust ─────────────────
+    # ── Validation failed → retry or skip function ───────────
     if event == "validation_failed":
         attempt = state.get("attempt", 0)
         new_attempt = attempt + 1
         validation = state.get("validation") or {}
+        fn_name = ((state.get("context") or {}).get("functions") or [{}])[0].get(
+            "name", "?"
+        )
         rejection_entry = {
             "attempt": attempt,
             "reason": validation.get("reason", "unknown"),
@@ -216,7 +299,7 @@ def orchestrator_node(state: PipelineState) -> dict:
         if new_attempt < MAX_RETRIES:
             print(
                 f"[Orchestrator] Validation FAILED (attempt {attempt}) — "
-                f"retry {new_attempt} ({Path(current['file']).name})"
+                f"retry {new_attempt} (`{fn_name}`)"
             )
             return {
                 "attempt": new_attempt,
@@ -224,20 +307,20 @@ def orchestrator_node(state: PipelineState) -> dict:
                 "next_agent": "remediation",
             }
 
-        # Retries exhausted → mark failed, advance
         print(
             f"[Orchestrator] Validation FAILED — retries exhausted "
-            f"({Path(current['file']).name}), marking chunk failed"
+            f"(`{fn_name}`), skipping function"
         )
         failed_entry = {
             "task": {
-                "rule_key": [i.get("rule") for i in current["issues"]],
+                "rule_key": [i.get("rule") for i in state.get("current_issues", [])],
                 "component": current["file"],
+                "function": fn_name,
             },
             "rejection_history": state.get("rejection_history", []) + [rejection_entry],
         }
         return {
-            **_next_chunk_or_finalize(state, chunk_index, chunks),
+            **_advance_function(state),
             "failed": [failed_entry],
             "last_event": None,
         }
@@ -253,8 +336,5 @@ def orchestrator_node(state: PipelineState) -> dict:
             "last_event": None,
         }
 
-    # Fallback (shouldn't normally be reached)
-    return {
-        **_next_chunk_or_finalize(state, chunk_index, chunks),
-        "last_event": None,
-    }
+    # Fallback
+    return {**_next_chunk_or_finalize(state, chunk_index, chunks), "last_event": None}

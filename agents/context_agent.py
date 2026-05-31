@@ -173,11 +173,39 @@ def _fallback_window(source: str, target_lines: list[int], window: int = 50) -> 
     return [{"name": "<snippet>", "start": start, "end": end, "source": snippet}]
 
 
+# ── Helpers ──────────────────────────────────────────────────
+
+def _group_issues_by_function(issues: list[dict], functions: list[dict]) -> list[dict]:
+    """
+    For each function, collect the issues whose start_line falls within it.
+    Returns a list of {fn, issues} dicts sorted descending by fn start line
+    (bottom of file first, so reverse-order patching avoids line number drift).
+    Issues that don't fall in any named function are dropped — they have no
+    actionable function context for the LLM.
+    """
+    groups: dict[int, dict] = {fn["start"]: {"fn": fn, "issues": []} for fn in functions}
+
+    for issue in issues:
+        line = issue.get("start_line")
+        if line is None:
+            continue
+        for fn in functions:
+            if fn["start"] <= line <= fn["end"]:
+                groups[fn["start"]]["issues"].append(issue)
+                break
+
+    return sorted(
+        [g for g in groups.values() if g["issues"]],
+        key=lambda g: g["fn"]["start"],
+        reverse=True,
+    )
+
+
 # ── Node ─────────────────────────────────────────────────────
 
 def context_node(state: PipelineState) -> dict:
     # SonarQube component format: "project_key:module:path/to/File.ext"
-    # Take everything after the second colon as the repo-relative file path.
+    # Take everything after the last colon as the repo-relative file path.
     component = state["current_file"]
     parts = component.split(":")
     file_path = parts[-1]
@@ -192,20 +220,24 @@ def context_node(state: PipelineState) -> dict:
     except FileNotFoundError:
         print(f"[Context] File not found: {abs_path} — skipping chunk")
         return {
+            "functions_to_process": [],
+            "current_code": "",
             "context": {
                 "file_path": file_path,
-                "language": _detect_language(file_path) or "unknown",
+                "language": "unknown",
                 "full_code": "",
                 "functions": [],
                 "import_block": "",
                 "name_inventory": [],
-            }
+            },
+            "last_event": "context_ready",
         }
 
     language = _detect_language(file_path)
+    all_issues = state["current_issues"]
     target_lines = [
         int(i["start_line"])
-        for i in state["current_issues"]
+        for i in all_issues
         if i.get("start_line") is not None
     ]
 
@@ -230,15 +262,25 @@ def context_node(state: PipelineState) -> dict:
     import_block = _extract_import_block(full_code, language or "")
     name_inventory = _extract_name_inventory(tree, source_bytes, language or "") if tree else []
 
-    print(f"[Context] Found {len(functions)} enclosing function(s) in {file_path}")
+    functions_to_process = _group_issues_by_function(all_issues, functions)
+    print(f"[Context] {len(functions_to_process)} function group(s) to process in {file_path}")
+
+    # Seed context with the first function (index 0, which is bottom-most)
+    first = functions_to_process[0] if functions_to_process else None
+    context = {
+        "file_path": file_path,
+        "language": language or "unknown",
+        "full_code": full_code,
+        "functions": [first["fn"]] if first else [],
+        "import_block": import_block,
+        "name_inventory": name_inventory,
+    }
 
     return {
-        "context": {
-            "file_path": file_path,
-            "language": language or "unknown",
-            "full_code": full_code,
-            "functions": functions,
-            "import_block": import_block,
-            "name_inventory": name_inventory,
-        }
+        "functions_to_process": functions_to_process,
+        "current_code": full_code,
+        "function_index": 0,
+        "current_issues": first["issues"] if first else [],
+        "context": context,
+        "last_event": "context_ready",
     }

@@ -37,12 +37,15 @@ class PipelineState(TypedDict):
     remediation_status: Optional[str]  # "passed" | "no_fix_needed" | "failed"
     remediation_reason: Optional[str]
     new_functions: list[str]  # helper names introduced by the patch
-    patched_code: Optional[
-        str
-    ]  # set by Validation Agent on pass; consumed by Documentation Agent
+    patched_code: Optional[str]  # patched function; consumed by Validation Agent
     validation: Optional[dict]  # Validation Agent output
     commit_message: Optional[str]  # Documentation Agent output
     rejection_history: Annotated[list, operator.add]  # grows per retry
+
+    # Per-function loop state — reset each chunk, advanced per function
+    function_index: int           # which function we're processing within the chunk
+    functions_to_process: list    # [{fn: dict, issues: list}] sorted desc by start line
+    current_code: str             # evolving file content; accumulates successful patches
 
     # Terminal collections
     approved: Annotated[list, operator.add]
@@ -79,4 +82,7 @@ def initialize_pipeline_state(
         "rejection_history": [],
         "approved": [],
         "failed": [],
+        "function_index": 0,
+        "functions_to_process": [],
+        "current_code": "",
     }

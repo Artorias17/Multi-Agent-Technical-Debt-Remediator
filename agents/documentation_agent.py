@@ -11,7 +11,7 @@ import tree_sitter_python as tspy
 import tree_sitter_c_sharp as tscs
 from tree_sitter import Language, Parser
 
-from agents.llm import get_client, MODEL
+from agents.llm import get_client, MODEL, debug_response
 
 # ── Language parsers (reuse same registry pattern as context_agent) ──
 
@@ -207,6 +207,7 @@ def _generate_helper_docstring(client, language: str, fn_name: str, source: str)
         temperature=0.1,
     )
     raw = resp.choices[0].message.content.strip()
+    debug_response("Documentation/docstring", raw)
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -236,7 +237,9 @@ def _generate_changelog(client, filename: str, issues: list[dict], description: 
         ],
         temperature=0.1,
     )
-    return resp.choices[0].message.content.strip()
+    content = resp.choices[0].message.content.strip()
+    debug_response("Documentation/changelog", content)
+    return content
 
 
 # ── Node ─────────────────────────────────────────────────────
@@ -256,14 +259,9 @@ def documentation_node(state: PipelineState) -> dict:
     client = get_client()
     primary_description = summary[0]["description"] if summary else ""
 
-    # ── Use pre-validated patched code from state (skip re-applying diff) ──
-    patched_code = state.get("patched_code")
-    if remediation_status == "passed" and patched_code:
-        print(f"[Documentation] Using pre-validated patched_code for {file_path}")
-        current_source = patched_code
-    else:
-        # no_fix_needed: read unmodified file from disk
-        current_source = abs_path.read_text(encoding="utf-8", errors="replace")
+    # current_code accumulates all successful function patches for this chunk
+    current_source = state.get("current_code") or abs_path.read_text(encoding="utf-8", errors="replace")
+    print(f"[Documentation] Writing accumulated patches for {file_path}")
 
     # ── Update docstring of the primary function ─────────────
     if summary and remediation_status == "passed":

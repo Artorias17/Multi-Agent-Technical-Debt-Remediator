@@ -1,6 +1,6 @@
 import json
 
-from agents.llm import get_client, MODEL
+from agents.llm import get_client, MODEL, debug_response
 from state import PipelineState
 
 _SYSTEM = (
@@ -36,6 +36,7 @@ def _describe_function(client, language: str, fn: dict) -> dict:
         temperature=0.1,
     )
     raw = resp.choices[0].message.content.strip()
+    debug_response("Summarizer", raw)
 
     # Strip optional markdown fences the model may still emit
     if raw.startswith("```"):
@@ -63,9 +64,6 @@ def summarizer_node(state: PipelineState) -> dict:
         return {"summary": []}
 
     client = get_client()
-    summaries = []
-    for fn in functions:
-        print(f"[Summarizer] Describing function: {fn['name']}")
-        summaries.append(_describe_function(client, language, fn))
-
-    return {"summary": summaries}
+    fn = functions[0]
+    print(f"[Summarizer] Describing function: {fn['name']}")
+    return {"summary": [_describe_function(client, language, fn)]}

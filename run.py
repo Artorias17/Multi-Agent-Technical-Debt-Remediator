@@ -2,13 +2,18 @@
 run.py — invoke the TD Agent pipeline against a SonarQube report JSON.
 
 Usage:
-    GITHUB_TOKEN=<token> python run.py --report data/sonar_report_<project>.json
+    python run.py --report data/sonar_report_<project>.json
+    (env vars are loaded from .env automatically)
 """
 
 import argparse
 import json
 import shutil
 import sys
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from graph import graph
 from state import initialize_pipeline_state

@@ -1,7 +1,7 @@
 import json
 import re
 
-from agents.llm import get_client, MODEL
+from agents.llm import get_client, MODEL, debug_response
 from state import PipelineState
 
 # ── Signature patterns to detect new helpers in a diff ───────
@@ -57,11 +57,13 @@ Existing imports (do NOT add any import/using/require not already present):
 Existing names (do NOT reuse any of these names for new helper functions):
 {name_inventory}
 
-Constraint: do NOT change any public method or function signature.
+Constraints:
+- Do NOT change any public method or function signature.
+- This function starts at line {fn_start} in the file — use full-file line numbers in the diff.
 
-Current file content:
+Current function:
 ```
-{full_code}
+{fn_source}
 ```
 """
 
@@ -149,7 +151,14 @@ def remediation_node(state: PipelineState) -> dict:
     summary = state.get("summary") or []
     rejection_history = state.get("rejection_history") or []
 
-    fn_source = functions[0]["source"] if functions else ctx.get("full_code", "")
+    fn = functions[0] if functions else None
+    fn_source = fn["source"] if fn else ctx.get("full_code", "")
+    fn_start = fn["start"] if fn else 1
+
+    if fn:
+        fn_issues = [i for i in issues if fn["start"] <= (i.get("start_line") or 0) <= fn["end"]]
+        issues = fn_issues or issues
+
     issue_text = _format_issues(issues)
     import_block = ctx.get("import_block", "(none)") or "(none)"
     name_inventory = "\n".join(ctx.get("name_inventory", [])) or "(none)"
@@ -171,6 +180,7 @@ def remediation_node(state: PipelineState) -> dict:
         temperature=0.1,
     )
 
+    debug_response("Remediation/triage", triage_resp.choices[0].message.content)
     try:
         triage = _parse_json(triage_resp.choices[0].message.content)
     except (json.JSONDecodeError, KeyError):
@@ -199,13 +209,15 @@ def remediation_node(state: PipelineState) -> dict:
                 rejection_block=_format_rejection_block(rejection_history),
                 import_block=import_block,
                 name_inventory=name_inventory,
-                full_code=ctx["full_code"],
+                fn_source=fn_source,
+                fn_start=fn_start,
             )},
         ],
         temperature=0.2,
     )
 
     raw = patch_resp.choices[0].message.content
+    debug_response("Remediation/patch", raw)
     diff = _extract_diff(raw)
 
     if not diff:

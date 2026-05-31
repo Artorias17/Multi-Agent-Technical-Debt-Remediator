@@ -30,15 +30,16 @@ builder.add_conditional_edges(
     "orchestrator",
     route_orchestrator,
     {
-        "vcs_setup": "vcs_setup",
+        "vcs_setup":     "vcs_setup",
         "context_agent": "context_agent",
+        "summarizer_agent": "summarizer_agent",
         "remediation_agent": "remediation_agent",
         "documentation_agent": "documentation_agent",
         "vcs_finalize": "vcs_finalize",
     },
 )
 
-builder.add_edge("context_agent", "summarizer_agent")
+builder.add_edge("context_agent", "orchestrator")
 builder.add_edge("summarizer_agent", "remediation_agent")
 builder.add_edge("remediation_agent", "validation_agent")
 builder.add_edge(
