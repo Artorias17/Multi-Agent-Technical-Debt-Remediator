@@ -127,6 +127,9 @@ def _node_name(node, source_bytes: bytes) -> str:
     return "<anonymous>"
 
 
+_PADDING_LINES = 5
+
+
 def _extract_functions_ts(
     source: str, language_key: str, target_lines: list[int]
 ) -> list[dict]:
@@ -159,7 +162,18 @@ def _extract_functions_ts(
             walk(child)
 
     walk(tree.root_node)
-    return list(seen.values())
+
+    lines = source.splitlines()
+    result = []
+    for fn in seen.values():
+        padded_start = max(1, fn["start"] - _PADDING_LINES)
+        padded_end = min(len(lines), fn["end"] + _PADDING_LINES)
+        result.append({
+            **fn,
+            "padded_source": "\n".join(lines[padded_start - 1 : padded_end]),
+            "padded_start": padded_start,
+        })
+    return result
 
 
 def _fallback_window(source: str, target_lines: list[int], window: int = 50) -> list[dict]:
@@ -170,7 +184,8 @@ def _fallback_window(source: str, target_lines: list[int], window: int = 50) -> 
     start = max(1, center - window)
     end = min(len(lines), center + window)
     snippet = "\n".join(lines[start - 1 : end])
-    return [{"name": "<snippet>", "start": start, "end": end, "source": snippet}]
+    return [{"name": "<snippet>", "start": start, "end": end, "source": snippet,
+             "padded_source": snippet, "padded_start": start}]
 
 
 # ── Helpers ──────────────────────────────────────────────────

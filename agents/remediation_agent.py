@@ -1,18 +1,7 @@
 import json
-import re
 
-from agents.llm import get_client, MODEL, debug_response
+from agents.llm import get_client, complete, debug_response, debug_request, parse_json
 from state import PipelineState
-
-# ── Signature patterns to detect new helpers in a diff ───────
-
-_SIG_PATTERNS: dict[str, re.Pattern] = {
-    "java":       re.compile(r"^\+\s*(?:private|protected|public|static)\s+\S+\s+(\w+)\s*\("),
-    "csharp":     re.compile(r"^\+\s*(?:private|protected|public|static)\s+\S+\s+(\w+)\s*\("),
-    "javascript": re.compile(r"^\+\s*(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=\s*(?:\(.*\)|[^=]+)\s*=>)"),
-    "typescript": re.compile(r"^\+\s*(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=\s*(?:\(.*\)|[^=]+)\s*=>)"),
-    "python":     re.compile(r"^\+\s*def\s+(\w+)\s*\("),
-}
 
 _TRIAGE_SYSTEM = (
     "You are a {language} refactoring expert. "
@@ -35,15 +24,14 @@ Return a JSON object:
 
 _PATCH_SYSTEM = (
     "You are a {language} refactoring expert. "
-    "Output ONLY a unified diff in standard diff -u format inside a ```diff fence. "
-    "No prose before or after. "
-    "If you extract helpers, give them descriptive names."
+    "Respond ONLY with valid JSON — no prose, no markdown fences."
 )
 
 _PATCH_USER = """\
 Fix the SonarQube issues listed below without changing the observable behaviour described in the summary.
 
 File: {file_path}
+Function: `{fn_name}` (starts at line {fn_start})
 
 Issues:
 {issues}
@@ -59,12 +47,22 @@ Existing names (do NOT reuse any of these names for new helper functions):
 
 Constraints:
 - Do NOT change any public method or function signature.
-- This function starts at line {fn_start} in the file — use full-file line numbers in the diff.
+- Return the complete, fixed source of `{fn_name}` only — no imports, no class wrapper, just the function.
+- If you extract helper functions, return their complete source in the helpers array.
 
 Current function:
 ```
 {fn_source}
 ```
+
+Return a JSON object with this exact shape:
+{{
+  "replacement": "<complete fixed source of `{fn_name}`>",
+  "helpers": [
+    {{"name": "<helper name>", "source": "<complete helper source>"}}
+  ]
+}}
+If no helpers are needed, return an empty array for helpers.
 """
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -105,42 +103,6 @@ def _format_rejection_block(rejection_history: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _extract_diff(text: str) -> str | None:
-    """Pull the diff from a ```diff ... ``` block, or return None."""
-    match = re.search(r"```diff\s*(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    # Fallback: if the response starts with --- it may be a raw diff
-    if re.search(r"^---\s", text, re.MULTILINE):
-        return text.strip()
-    return None
-
-
-def _extract_new_functions(diff: str, language: str) -> list[str]:
-    pattern = _SIG_PATTERNS.get(language)
-    if not pattern:
-        return []
-    names: list[str] = []
-    for line in diff.splitlines():
-        m = pattern.match(line)
-        if m:
-            # Some patterns have multiple capture groups
-            name = next((g for g in m.groups() if g), None)
-            if name and name not in names:
-                names.append(name)
-    return names
-
-
-def _parse_json(text: str) -> dict:
-    raw = text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-    return json.loads(raw)
-
-
 # ── Node ─────────────────────────────────────────────────────
 
 def remediation_node(state: PipelineState) -> dict:
@@ -154,6 +116,7 @@ def remediation_node(state: PipelineState) -> dict:
     fn = functions[0] if functions else None
     fn_source = fn["source"] if fn else ctx.get("full_code", "")
     fn_start = fn["start"] if fn else 1
+    fn_name = fn["name"] if fn else "<unknown>"
 
     if fn:
         fn_issues = [i for i in issues if fn["start"] <= (i.get("start_line") or 0) <= fn["end"]]
@@ -167,74 +130,87 @@ def remediation_node(state: PipelineState) -> dict:
 
     # ── Step 1: triage ───────────────────────────────────────
     print(f"[Remediation] Triaging {len(issues)} issue(s) in {ctx['file_path']}")
-    triage_resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": _TRIAGE_SYSTEM.format(language=language)},
-            {"role": "user", "content": _TRIAGE_USER.format(
-                language=language,
-                issues=issue_text,
-                source=fn_source,
-            )},
-        ],
-        temperature=0.1,
-    )
+    triage_messages = [
+        {"role": "system", "content": _TRIAGE_SYSTEM.format(language=language)},
+        {"role": "user", "content": _TRIAGE_USER.format(
+            language=language,
+            issues=issue_text,
+            source=fn_source,
+        )},
+    ]
+    debug_request("Remediation/triage", triage_messages)
+    triage_resp = complete(client, triage_messages, temperature=0.1)
 
     debug_response("Remediation/triage", triage_resp.choices[0].message.content)
     try:
-        triage = _parse_json(triage_resp.choices[0].message.content)
+        triage = parse_json(triage_resp.choices[0].message.content)
     except (json.JSONDecodeError, KeyError):
         triage = {"fix_needed": True, "reason": "triage parse failed, attempting fix"}
 
     if not triage.get("fix_needed", True):
         print(f"[Remediation] No fix needed: {triage.get('reason')}")
         return {
-            "diff": None,
+            "replacement": None,
+            "helpers": [],
             "remediation_status": "no_fix_needed",
             "remediation_reason": triage.get("reason", ""),
             "new_functions": [],
         }
 
-    # ── Step 2: generate patch ───────────────────────────────
-    print("[Remediation] Generating patch")
-    patch_resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": _PATCH_SYSTEM.format(language=language)},
-            {"role": "user", "content": _PATCH_USER.format(
-                language=language,
-                file_path=ctx["file_path"],
-                issues=issue_text,
-                summary=_format_summary(summary),
-                rejection_block=_format_rejection_block(rejection_history),
-                import_block=import_block,
-                name_inventory=name_inventory,
-                fn_source=fn_source,
-                fn_start=fn_start,
-            )},
-        ],
-        temperature=0.2,
-    )
+    # ── Step 2: generate replacement ────────────────────────
+    print("[Remediation] Generating replacement")
+    patch_messages = [
+        {"role": "system", "content": _PATCH_SYSTEM.format(language=language)},
+        {"role": "user", "content": _PATCH_USER.format(
+            language=language,
+            file_path=ctx["file_path"],
+            issues=issue_text,
+            summary=_format_summary(summary),
+            rejection_block=_format_rejection_block(rejection_history),
+            import_block=import_block,
+            name_inventory=name_inventory,
+            fn_source=fn_source,
+            fn_start=fn_start,
+            fn_name=fn_name,
+        )},
+    ]
+    debug_request("Remediation/patch", patch_messages)
+    patch_resp = complete(client, patch_messages, temperature=0.2)
 
     raw = patch_resp.choices[0].message.content
     debug_response("Remediation/patch", raw)
-    diff = _extract_diff(raw)
 
-    if not diff:
-        print("[Remediation] Could not extract diff from LLM response")
+    try:
+        result = parse_json(raw)
+        replacement = result.get("replacement", "").strip()
+        helpers = result.get("helpers", [])
+    except (json.JSONDecodeError, KeyError):
+        print("[Remediation] Could not parse replacement from LLM response")
         return {
-            "diff": None,
+            "replacement": None,
+            "helpers": [],
             "remediation_status": "failed",
-            "remediation_reason": "LLM response did not contain a parseable unified diff",
+            "remediation_reason": "LLM response did not contain parseable replacement JSON",
             "new_functions": [],
         }
 
-    new_functions = _extract_new_functions(diff, language)
+    if not replacement:
+        print("[Remediation] Empty replacement in LLM response")
+        return {
+            "replacement": None,
+            "helpers": [],
+            "remediation_status": "failed",
+            "remediation_reason": "LLM returned empty replacement function",
+            "new_functions": [],
+        }
+
+    new_functions = [h["name"] for h in helpers if h.get("name")]
     if new_functions:
-        print(f"[Remediation] New helpers detected: {new_functions}")
+        print(f"[Remediation] New helpers: {new_functions}")
 
     return {
-        "diff": diff,
+        "replacement": replacement,
+        "helpers": helpers,
         "remediation_status": "passed",
         "remediation_reason": triage.get("reason", ""),
         "new_functions": new_functions,

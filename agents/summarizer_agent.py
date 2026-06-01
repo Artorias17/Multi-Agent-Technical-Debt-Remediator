@@ -1,6 +1,4 @@
-import json
-
-from agents.llm import get_client, MODEL, debug_response
+from agents.llm import get_client, complete, debug_response, debug_request, parse_json
 from state import PipelineState
 
 _SYSTEM = (
@@ -27,27 +25,18 @@ Function source:
 
 
 def _describe_function(client, language: str, fn: dict) -> dict:
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": _SYSTEM.format(language=language)},
-            {"role": "user", "content": _USER.format(source=fn["source"])},
-        ],
-        temperature=0.1,
-    )
+    messages = [
+        {"role": "system", "content": _SYSTEM.format(language=language)},
+        {"role": "user", "content": _USER.format(source=fn["source"])},
+    ]
+    debug_request("Summarizer", messages)
+    resp = complete(client, messages, temperature=0.1)
     raw = resp.choices[0].message.content.strip()
     debug_response("Summarizer", raw)
 
-    # Strip optional markdown fences the model may still emit
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-
     try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
+        result = parse_json(raw)
+    except Exception:
         result = {"description": raw, "parameters": [], "returns": "unknown"}
 
     result["function_name"] = fn["name"]

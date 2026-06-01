@@ -1,9 +1,7 @@
 import ast
 import json
-from pathlib import Path
 
-import whatthepatch
-from agents.llm import get_client, MODEL, debug_response
+from agents.llm import get_client, complete, debug_response, debug_request, parse_json
 from state import PipelineState
 
 _SYSTEM = (
@@ -12,12 +10,12 @@ _SYSTEM = (
 )
 
 _USER = """\
-Review whether the patched file fully resolves the SonarQube issues listed below without introducing regressions.
+Review whether the patched code fully resolves the SonarQube issues listed below without introducing regressions.
 
 Issues that must be resolved:
 {issues}
 
-Patched file content:
+Patched code:
 ```
 {patched_code}
 ```
@@ -35,68 +33,62 @@ def _format_issues(issues: list[dict]) -> str:
     )
 
 
-def _apply_diff_to_temp(source: str, diff: str) -> tuple[bool, str, str]:
+def _apply_replacement(
+    current_code: str,
+    language: str,
+    fn_name: str,
+    replacement: str,
+    helpers: list[dict],
+) -> tuple[bool, str, str]:
     """
-    Apply diff to source in memory using whatthepatch.
+    Splice replacement function + helpers into current_code using tree-sitter byte offsets.
+    Helpers are inserted immediately before the target function.
     Returns (success, patched_content, error_message).
     """
-    try:
-        patches = list(whatthepatch.parse_patch(diff))
-        if not patches:
-            return False, "", "No patches found in diff"
-
-        text = source
-        for patch in patches:
-            if not patch.changes:
-                continue
-            result = whatthepatch.apply_diff(patch, text)
-            if result is None:
-                return False, "", "Patch did not apply cleanly (context mismatch)"
-            text = "".join(result)
-
-        return True, text, ""
-    except Exception as exc:
-        return False, "", str(exc)
-
-
-def _extract_function(source: str, language: str, fn_name: str) -> str:
-    """Extract named function from source using tree-sitter. Falls back to full source."""
     from agents.context_agent import _LANGUAGE_CONFIG
     from tree_sitter import Parser
 
     cfg = _LANGUAGE_CONFIG.get(language)
     if cfg is None:
-        return source
+        return False, "", f"Unsupported language: {language}"
 
-    source_bytes = source.encode("utf-8")
+    source_bytes = current_code.encode("utf-8")
     parser = Parser(cfg["language"])
     tree = parser.parse(source_bytes)
     fn_node_types = cfg["function_nodes"]
 
+    target_node = None
+
     def walk(node):
+        nonlocal target_node
+        if target_node is not None:
+            return
         if node.type in fn_node_types:
             for child in node.children:
                 if child.type == "identifier":
                     name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
                     if name == fn_name:
-                        return node
+                        target_node = node
+                        return
         for child in node.children:
-            result = walk(child)
-            if result is not None:
-                return result
-        return None
+            walk(child)
 
-    node = walk(tree.root_node)
-    if node is None:
-        return source
-    return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+    walk(tree.root_node)
+
+    if target_node is None:
+        return False, "", f"Function `{fn_name}` not found in source"
+
+    helper_sources = [h["source"] for h in helpers if h.get("source")]
+    helpers_block = ("\n\n".join(helper_sources) + "\n\n") if helper_sources else ""
+
+    before = source_bytes[:target_node.start_byte].decode("utf-8", errors="replace")
+    after = source_bytes[target_node.end_byte:].decode("utf-8", errors="replace")
+    patched = before + helpers_block + replacement + after
+
+    return True, patched, ""
 
 
 def _syntax_check(patched_code: str, language: str) -> tuple[bool, str]:
-    """
-    Returns (ok, error_message).
-    Python uses ast.parse (stdlib). Other languages use tree-sitter ERROR node detection.
-    """
     if language == "python":
         try:
             ast.parse(patched_code)
@@ -109,7 +101,7 @@ def _syntax_check(patched_code: str, language: str) -> tuple[bool, str]:
 
     cfg = _LANGUAGE_CONFIG.get(language)
     if cfg is None:
-        return True, ""  # unknown language — skip
+        return True, ""
 
     parser = Parser(cfg["language"])
     tree = parser.parse(patched_code.encode("utf-8"))
@@ -128,22 +120,11 @@ def _syntax_check(patched_code: str, language: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _parse_json(text: str) -> dict:
-    raw = text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-    return json.loads(raw)
-
-
 def validation_node(state: PipelineState) -> dict:
     remediation_status = state.get("remediation_status", "passed")
     ctx = state["context"]
     language = ctx.get("language", "unknown")
 
-    # Pass-through: remediation decided no change was needed
     if remediation_status == "no_fix_needed":
         return {
             "validation": {
@@ -154,84 +135,75 @@ def validation_node(state: PipelineState) -> dict:
             "last_event": "validation_passed",
         }
 
-    diff = state.get("diff")
-    if not diff:
+    replacement = state.get("replacement")
+    if not replacement:
         return {
             "validation": {
                 "passed": False,
-                "reason": "No diff was produced by the Remediation Agent",
+                "reason": "No replacement was produced by the Remediation Agent",
             },
             "last_event": "validation_failed",
         }
 
     issues = state["current_issues"]
-
-    # Diffs use full-file line numbers, so apply against the full evolving file.
+    helpers = state.get("helpers") or []
     current_code = state.get("current_code") or ctx["full_code"]
 
-    print(f"[Validation] Applying patch to {ctx['file_path']}")
+    functions = ctx.get("functions", [])
+    fn = functions[0] if functions else None
+    fn_name = fn["name"] if fn else None
 
-    # ── Phase 1: structural check (patch applies cleanly) ────
-    ok, patched_code, err = _apply_diff_to_temp(current_code, diff)
+    print(f"[Validation] Applying replacement to {ctx['file_path']}")
+
+    if fn_name:
+        ok, patched_code, err = _apply_replacement(current_code, language, fn_name, replacement, helpers)
+    else:
+        patched_code = replacement
+        ok, err = True, ""
+
     if not ok:
-        print(f"[Validation] Patch failed to apply: {err.strip()}")
+        print(f"[Validation] Replacement failed to apply: {err}")
         return {
-            "validation": {
-                "passed": False,
-                "reason": f"Patch did not apply cleanly: {err.strip()}",
-            },
+            "validation": {"passed": False, "reason": err},
             "last_event": "validation_failed",
         }
 
-    # Extract just the patched function for review (by name, not line slice)
-    functions = ctx.get("functions", [])
-    fn = functions[0] if functions else None
-    if fn:
-        patched_fn = _extract_function(patched_code, language, fn["name"])
-    else:
-        patched_fn = patched_code
-
-    # ── Phase 0: syntax check (on patched function) ──────────
+    # ── Syntax check on replacement function ────────────────
     print(f"[Validation] Running syntax check ({language})")
-    syntax_ok, syntax_err = _syntax_check(patched_fn, language)
+    syntax_ok, syntax_err = _syntax_check(replacement, language)
     if not syntax_ok:
         print(f"[Validation] Syntax check FAILED: {syntax_err}")
         return {
-            "validation": {
-                "passed": False,
-                "reason": f"Syntax error in patched file: {syntax_err}",
-            },
+            "validation": {"passed": False, "reason": f"Syntax error: {syntax_err}"},
             "last_event": "validation_failed",
         }
 
-    # ── Phase 2: semantic LLM review (on patched function) ───
+    # ── Semantic LLM review on replacement + helpers ─────────
     print("[Validation] Running semantic review")
+    helper_sources = [h["source"] for h in helpers if h.get("source")]
+    review_code = replacement
+    if helper_sources:
+        review_code = "\n\n".join(helper_sources) + "\n\n" + replacement
+
     client = get_client()
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": _SYSTEM},
-            {
-                "role": "user",
-                "content": _USER.format(
-                    issues=_format_issues(issues),
-                    patched_code=patched_fn,
-                ),
-            },
-        ],
-        temperature=0.1,
-    )
+    review_messages = [
+        {"role": "system", "content": _SYSTEM},
+        {"role": "user", "content": _USER.format(
+            issues=_format_issues(issues),
+            patched_code=review_code,
+        )},
+    ]
+    debug_request("Validation", review_messages)
+    resp = complete(client, review_messages, temperature=0.1)
 
     debug_response("Validation", resp.choices[0].message.content)
     try:
-        result = _parse_json(resp.choices[0].message.content)
-    except json.JSONDecodeError, KeyError:
+        result = parse_json(resp.choices[0].message.content)
+    except (json.JSONDecodeError, KeyError):
         result = {"passed": False, "reason": "Could not parse semantic review response"}
 
     passed = result.get("passed", False)
-    print(
-        f"[Validation] {'PASSED' if passed else 'FAILED'}: {result.get('reason', '')}"
-    )
+    print(f"[Validation] {'PASSED' if passed else 'FAILED'}: {result.get('reason', '')}")
 
     if passed:
         return {

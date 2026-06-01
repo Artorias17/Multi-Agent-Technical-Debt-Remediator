@@ -33,7 +33,8 @@ class PipelineState(TypedDict):
     current_issues: list[dict]
     context: Optional[dict]  # Context Agent output
     summary: Optional[dict]  # Summarizer Agent output
-    diff: Optional[str]  # Remediation Agent output
+    replacement: Optional[str]  # Remediation Agent output — fixed function source
+    helpers: list[dict]  # Remediation Agent output — [{"name": ..., "source": ...}]
     remediation_status: Optional[str]  # "passed" | "no_fix_needed" | "failed"
     remediation_reason: Optional[str]
     new_functions: list[str]  # helper names introduced by the patch
@@ -72,7 +73,8 @@ def initialize_pipeline_state(
         "current_issues": [],
         "context": None,
         "summary": None,
-        "diff": None,
+        "replacement": None,
+        "helpers": [],
         "remediation_status": None,
         "remediation_reason": None,
         "new_functions": [],

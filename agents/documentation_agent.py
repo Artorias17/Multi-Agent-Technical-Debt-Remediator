@@ -11,7 +11,7 @@ import tree_sitter_python as tspy
 import tree_sitter_c_sharp as tscs
 from tree_sitter import Language, Parser
 
-from agents.llm import get_client, MODEL, debug_response
+from agents.llm import get_client, complete, debug_response, debug_request
 
 # ── Language parsers (reuse same registry pattern as context_agent) ──
 
@@ -198,23 +198,17 @@ Function summary: {description}
 
 def _generate_helper_docstring(client, language: str, fn_name: str, source: str) -> dict:
     import json
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": _DOCSTRING_SYSTEM.format(language=language)},
-            {"role": "user", "content": _DOCSTRING_USER.format(language=language, source=source)},
-        ],
-        temperature=0.1,
-    )
+    messages = [
+        {"role": "system", "content": _DOCSTRING_SYSTEM.format(language=language)},
+        {"role": "user", "content": _DOCSTRING_USER.format(language=language, source=source)},
+    ]
+    debug_request("Documentation/docstring", messages)
+    resp = complete(client, messages, temperature=0.1)
     raw = resp.choices[0].message.content.strip()
     debug_response("Documentation/docstring", raw)
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
     try:
-        result = json.loads(raw)
+        from agents.llm import parse_json
+        result = parse_json(raw)
     except Exception:
         result = {"description": raw, "parameters": [], "returns": "unknown"}
     result["function_name"] = fn_name
@@ -225,18 +219,16 @@ def _generate_changelog(client, filename: str, issues: list[dict], description: 
     issue_text = "; ".join(
         f"{i.get('rule', '?')}: {i.get('action_message', '')}" for i in issues
     )
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": _CHANGELOG_SYSTEM},
-            {"role": "user", "content": _CHANGELOG_USER.format(
-                filename=filename,
-                issues=issue_text,
-                description=description,
-            )},
-        ],
-        temperature=0.1,
-    )
+    messages = [
+        {"role": "system", "content": _CHANGELOG_SYSTEM},
+        {"role": "user", "content": _CHANGELOG_USER.format(
+            filename=filename,
+            issues=issue_text,
+            description=description,
+        )},
+    ]
+    debug_request("Documentation/changelog", messages)
+    resp = complete(client, messages, temperature=0.1)
     content = resp.choices[0].message.content.strip()
     debug_response("Documentation/changelog", content)
     return content
@@ -253,7 +245,6 @@ def documentation_node(state: PipelineState) -> dict:
     issues = state["current_issues"]
     summary: list[dict] = state.get("summary") or []
     new_functions: list[str] = state.get("new_functions") or []
-    diff = state.get("diff")
     remediation_status = state.get("remediation_status", "passed")
 
     client = get_client()
@@ -307,7 +298,6 @@ def documentation_node(state: PipelineState) -> dict:
     rule_keys = list({i.get("rule") for i in issues if i.get("rule")})
     approved_item = {
         "patch": {
-            "diff": diff or "",
             "rule_key": rule_keys,
             "target_file": file_path,
         },
