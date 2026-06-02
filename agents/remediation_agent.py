@@ -49,6 +49,7 @@ Constraints:
 - Do NOT change any public method or function signature.
 - Return the complete, fixed source of `{fn_name}` only — no imports, no class wrapper, just the function.
 - If you extract helper functions, return their complete source in the helpers array.
+- Before returning, audit every helper: every variable it uses must be declared locally, passed as an explicit parameter, or be a module-level import or global. Do NOT implicitly capture variables from the calling function's scope — pass them explicitly as parameters.
 
 Current function:
 ```
