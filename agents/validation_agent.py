@@ -1,5 +1,6 @@
 import ast
 import json
+from pathlib import Path
 
 from agents.llm import get_client, complete, debug_response, debug_request, parse_json
 from state import PipelineState
@@ -206,6 +207,11 @@ def validation_node(state: PipelineState) -> dict:
     print(f"[Validation] {'PASSED' if passed else 'FAILED'}: {result.get('reason', '')}")
 
     if passed:
+        repo_path = state.get("repo_path")
+        if repo_path:
+            abs_path = Path(repo_path) / ctx["file_path"]
+            abs_path.write_text(patched_code, encoding="utf-8")
+            print(f"[Validation] Written to disk: {ctx['file_path']}")
         return {
             "validation": result,
             "patched_code": patched_code,

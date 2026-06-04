@@ -41,7 +41,7 @@ class PipelineState(TypedDict):
     patched_code: Optional[str]  # patched function; consumed by Validation Agent
     validation: Optional[dict]  # Validation Agent output
     commit_message: Optional[str]  # Documentation Agent output
-    rejection_history: Annotated[list, operator.add]  # grows per retry
+    rejection_history: list  # grows per retry, reset per function
 
     # Per-function loop state — reset each chunk, advanced per function
     function_index: int           # which function we're processing within the chunk

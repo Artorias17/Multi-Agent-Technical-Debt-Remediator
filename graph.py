@@ -5,13 +5,14 @@ from agents.summarizer_agent import summarizer_node
 from agents.remediation_agent import remediation_node
 from agents.validation_agent import validation_node
 from agents.documentation_agent import documentation_node
-from agents.vcs_agent import vcs_setup, vcs_finalize
+from agents.vcs_agent import vcs_setup, vcs_commit_chunk, vcs_finalize
 from state import PipelineState
 
 # ── Build graph ─────────────────────────────────────────────
 builder = StateGraph(PipelineState)
 
 builder.add_node("vcs_setup", vcs_setup)
+builder.add_node("vcs_commit_chunk", vcs_commit_chunk)
 builder.add_node("vcs_finalize", vcs_finalize)
 
 builder.add_node("orchestrator", orchestrator_node)
@@ -30,25 +31,22 @@ builder.add_conditional_edges(
     "orchestrator",
     route_orchestrator,
     {
-        "vcs_setup":     "vcs_setup",
-        "context_agent": "context_agent",
-        "summarizer_agent": "summarizer_agent",
-        "remediation_agent": "remediation_agent",
-        "documentation_agent": "documentation_agent",
-        "vcs_finalize": "vcs_finalize",
+        "vcs_setup":          "vcs_setup",
+        "context_agent":      "context_agent",
+        "summarizer_agent":   "summarizer_agent",
+        "remediation_agent":  "remediation_agent",
+        "documentation_agent":"documentation_agent",
+        "vcs_commit_chunk":   "vcs_commit_chunk",
+        "vcs_finalize":       "vcs_finalize",
     },
 )
 
 builder.add_edge("context_agent", "orchestrator")
 builder.add_edge("summarizer_agent", "remediation_agent")
 builder.add_edge("remediation_agent", "validation_agent")
-builder.add_edge(
-    "validation_agent", "orchestrator"
-)  # unconditional: orchestrator decides next step
-builder.add_edge(
-    "documentation_agent", "orchestrator"
-)  # unconditional: orchestrator advances chunk
-
+builder.add_edge("validation_agent", "orchestrator")
+builder.add_edge("documentation_agent", "orchestrator")
+builder.add_edge("vcs_commit_chunk", "orchestrator")
 builder.add_edge("vcs_finalize", END)
 
 graph = builder.compile()

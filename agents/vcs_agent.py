@@ -36,43 +36,39 @@ def _build_commit_message(rule: str, file: str, changelog: str) -> str:
     )
 
 
-def _build_pr_body(approved: list, failed: list, commits: list) -> str:
+_SEVERITY_ORDER = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
+
+
+def _build_pr_body(approved: list, failed: list, commit_count: int) -> str:
+    resolved_issues = [i for item in approved for i in item["patch"].get("issues", [])]
+    failed_issues = [i for item in failed for i in item["task"].get("issues", [])]
+    total = len(resolved_issues) + len(failed_issues)
+
     lines = ["## Technical Debt Agent — Automated Fix PR", ""]
 
     lines += [
         "### Summary",
-        f"- ✅ Resolved: {len(approved)} issue(s)",
-        f"- ❌ Failed:   {len(failed)} issue(s)",
-        f"- 🔀 Commits:  {len(commits)}",
+        f"- Resolved: {len(resolved_issues)} of {total} issue(s) across {len({item['patch']['target_file'] for item in approved})} file(s)",
+        f"- Failed: {len(failed_issues)} issue(s)",
+        f"- Commits: {commit_count}",
         "",
     ]
 
-    if approved:
-        lines += ["### ✅ Resolved Issues", ""]
-        for item in approved:
-            patch = item["patch"]
-            lines.append(
-                f"- `{patch['rule_key']}` in `{Path(patch['target_file']).name}`"
-                + (
-                    f" — {item['changelog_entry']}"
-                    if item.get("changelog_entry")
-                    else ""
-                )
-            )
-        lines.append("")
+    if resolved_issues:
+        severity_counts: dict[str, int] = {}
+        for issue in resolved_issues:
+            sev = issue.get("severity", "INFO")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
 
-    if failed:
-        lines += ["### ❌ Failed Issues (exhausted retries)", ""]
-        for item in failed:
-            task = item["task"]
-            lines.append(f"- `{task['rule_key']}` in `{Path(task['component']).name}`")
-            for r in item.get("rejection_history", []):
-                lines.append(f"  - Attempt {r['attempt']}: {r['reason']}")
+        lines += ["### Severity breakdown (resolved)", ""]
+        for sev in _SEVERITY_ORDER:
+            if sev in severity_counts:
+                lines.append(f"- {sev}: {severity_counts[sev]}")
         lines.append("")
 
     lines += [
         "---",
-        "> ⚠️ This PR was opened automatically. Do not merge without review.",
+        "> This PR was opened automatically. Do not merge without review.",
     ]
     return "\n".join(lines)
 
@@ -107,11 +103,45 @@ def vcs_setup(state: PipelineState) -> dict:
     }
 
 
+def vcs_commit_chunk(state: PipelineState) -> dict:
+    """Commit the current file's patches immediately after all its functions are processed."""
+    repo_path = state["repo_path"]
+    ctx = state.get("context") or {}
+    file_path = ctx.get("file_path", "")
+    approved = state.get("approved") or []
+
+    file_entries = [item for item in approved if item["patch"]["target_file"] == file_path]
+
+    if not file_entries:
+        print(f"[VCS] No approved patches for {Path(file_path).name} — skipping commit")
+        return {"last_event": "chunk_committed"}
+
+    repo = Repo(repo_path)
+    repo.index.add([file_path])
+
+    if not repo.index.diff("HEAD"):
+        print(f"[VCS] No changes to commit for {Path(file_path).name} — skipping")
+        return {"last_event": "chunk_committed"}
+
+    rule_keys = [k for item in file_entries for k in (item["patch"].get("rule_key") or [])]
+    rule_str = rule_keys[0] if rule_keys else "multiple"
+    changelog = "\n".join(
+        item.get("changelog_entry", "") for item in file_entries if item.get("changelog_entry")
+    )
+
+    msg = _build_commit_message(
+        rule=rule_str,
+        file=Path(file_path).name,
+        changelog=changelog,
+    )
+    commit = repo.index.commit(msg)
+    print(f"[VCS] Committed {commit.hexsha[:12]}: {Path(file_path).name}")
+
+    return {"last_event": "chunk_committed"}
+
+
 def vcs_finalize(state: PipelineState) -> dict:
-    """
-    Commit all approved patches as atomic commits, push the feature branch,
-    and open a pull request. Called once after all chunks reach terminal state.
-    """
+    """Push the feature branch and open a pull request."""
     assert state["repo_path"] and state["branch_name"]
     report = state["report"]
     approved = state.get("approved") or []
@@ -120,27 +150,7 @@ def vcs_finalize(state: PipelineState) -> dict:
     branch_name = state["branch_name"]
 
     repo = Repo(repo_path)
-
-    # ── Batch commit all approved patches ────────────────────
-    commits = []
-    for item in approved:
-        patch = item["patch"]
-        target_file = patch["target_file"]  # repo-relative path
-        rule_key = patch.get("rule_key", [])
-        rule_str = (
-            rule_key[0] if isinstance(rule_key, list) and rule_key else str(rule_key)
-        )
-        changelog = item.get("changelog_entry", "")
-
-        repo.index.add([target_file])
-        msg = _build_commit_message(
-            rule=rule_str,
-            file=Path(target_file).name,
-            changelog=changelog,
-        )
-        commit = repo.index.commit(msg)
-        print(f"[VCS] Committed {commit.hexsha[:12]}: {Path(target_file).name}")
-        commits.append({"sha": commit.hexsha, "message": msg})
+    commit_count = len({item["patch"]["target_file"] for item in approved})
 
     # ── Push branch ──────────────────────────────────────────
     origin = repo.remote("origin")
@@ -154,7 +164,7 @@ def vcs_finalize(state: PipelineState) -> dict:
 
     pr = gh_repo.create_pull(
         title=f"[TD Agent] Fix {len(approved)} issue(s) — {branch_name.split('/')[-1]}",
-        body=_build_pr_body(approved, failed, commits),
+        body=_build_pr_body(approved, failed, commit_count),
         head=branch_name,
         base=base_branch,
     )

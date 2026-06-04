@@ -197,7 +197,6 @@ Function summary: {description}
 
 
 def _generate_helper_docstring(client, language: str, fn_name: str, source: str) -> dict:
-    import json
     messages = [
         {"role": "system", "content": _DOCSTRING_SYSTEM.format(language=language)},
         {"role": "user", "content": _DOCSTRING_USER.format(language=language, source=source)},
@@ -250,40 +249,43 @@ def documentation_node(state: PipelineState) -> dict:
     client = get_client()
     primary_description = summary[0]["description"] if summary else ""
 
-    # current_code accumulates all successful function patches for this chunk
-    current_source = state.get("current_code") or abs_path.read_text(encoding="utf-8", errors="replace")
-    print(f"[Documentation] Writing accumulated patches for {file_path}")
+    # Patch is already on disk (written by validation agent).
+    # Read it as the base for docstring insertion.
+    current_source = abs_path.read_text(encoding="utf-8", errors="replace")
 
-    # ── Update docstring of the primary function ─────────────
+    # ── Insert docstrings (only when a real fix was applied) ──
     if summary and remediation_status == "passed":
+        documented_source = current_source
+
         primary_fn = summary[0]["function_name"]
-        print(f"[Documentation] Updating docstring for `{primary_fn}`")
+        print(f"[Documentation] Inserting docstring for `{primary_fn}`")
         docstring = _format_docstring(language, summary[0])
-        current_source = _insert_docstring(current_source, language, primary_fn, docstring)
+        documented_source = _insert_docstring(documented_source, language, primary_fn, docstring)
 
-    # ── Generate + insert docstrings for new helpers ─────────
-    if new_functions and remediation_status == "passed":
-        parser = _PARSERS.get(language)
-        fn_node_types = _FUNCTION_NODES.get(language, set())
-        for fn_name in new_functions:
-            # Extract the helper's source from the patched file
-            if parser:
-                src_bytes = current_source.encode("utf-8")
-                tree = parser.parse(src_bytes)
-                node = _find_function_node(tree, src_bytes, fn_name, fn_node_types)
-                fn_src = src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace") if node else ""
-            else:
-                fn_src = ""
+        if new_functions:
+            parser = _PARSERS.get(language)
+            fn_node_types = _FUNCTION_NODES.get(language, set())
+            for fn_name in new_functions:
+                if parser:
+                    src_bytes = documented_source.encode("utf-8")
+                    tree = parser.parse(src_bytes)
+                    node = _find_function_node(tree, src_bytes, fn_name, fn_node_types)
+                    fn_src = src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace") if node else ""
+                else:
+                    fn_src = ""
+                if fn_src:
+                    print(f"[Documentation] Inserting docstring for helper `{fn_name}`")
+                    helper_entry = _generate_helper_docstring(client, language, fn_name, fn_src)
+                    helper_docstring = _format_docstring(language, helper_entry)
+                    documented_source = _insert_docstring(documented_source, language, fn_name, helper_docstring)
 
-            if fn_src:
-                print(f"[Documentation] Generating docstring for helper `{fn_name}`")
-                helper_entry = _generate_helper_docstring(client, language, fn_name, fn_src)
-                docstring = _format_docstring(language, helper_entry)
-                current_source = _insert_docstring(current_source, language, fn_name, docstring)
-
-    # ── Write modified file back to disk ─────────────────────
-    abs_path.write_text(current_source, encoding="utf-8")
-    print(f"[Documentation] Wrote documented file: {file_path}")
+        from agents.validation_agent import _syntax_check
+        syntax_ok, syntax_err = _syntax_check(documented_source, language)
+        if syntax_ok:
+            abs_path.write_text(documented_source, encoding="utf-8")
+            print(f"[Documentation] Written with docstrings: {file_path}")
+        else:
+            print(f"[Documentation] Docstring syntax check failed ({syntax_err}) — patch preserved, docstring skipped")
 
     # ── Generate commit message ───────────────────────────────
     commit_message = _generate_changelog(
@@ -300,6 +302,7 @@ def documentation_node(state: PipelineState) -> dict:
         "patch": {
             "rule_key": rule_keys,
             "target_file": file_path,
+            "issues": issues,
         },
         "changelog_entry": commit_message,
     }
