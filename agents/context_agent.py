@@ -124,6 +124,12 @@ def _node_name(node, source_bytes: bytes) -> str:
     for child in node.children:
         if child.type == "identifier":
             return source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+    # Arrow functions: name lives on the parent variable_declarator
+    parent = node.parent
+    if parent and parent.type == "variable_declarator":
+        for child in parent.children:
+            if child.type == "identifier":
+                return source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
     return "<anonymous>"
 
 

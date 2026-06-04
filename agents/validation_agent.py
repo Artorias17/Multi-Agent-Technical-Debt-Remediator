@@ -71,6 +71,15 @@ def _apply_replacement(
                     if name == fn_name:
                         target_node = node
                         return
+            # Arrow functions: check parent variable_declarator for the name
+            parent = node.parent
+            if parent and parent.type == "variable_declarator":
+                for child in parent.children:
+                    if child.type == "identifier":
+                        name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                        if name == fn_name:
+                            target_node = node
+                            return
         for child in node.children:
             walk(child)
 

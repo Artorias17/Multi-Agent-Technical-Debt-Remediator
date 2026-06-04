@@ -81,6 +81,13 @@ def _find_function_node(tree, source_bytes: bytes, name: str, fn_node_types: set
                     node_name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
                     if node_name == name:
                         return node
+            parent = node.parent
+            if parent and parent.type == "variable_declarator":
+                for child in parent.children:
+                    if child.type == "identifier":
+                        node_name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                        if node_name == name:
+                            return node
         for child in node.children:
             result = walk(child)
             if result is not None:
