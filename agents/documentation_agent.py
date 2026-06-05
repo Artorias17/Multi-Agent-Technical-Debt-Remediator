@@ -11,7 +11,7 @@ import tree_sitter_python as tspy
 import tree_sitter_c_sharp as tscs
 from tree_sitter import Language, Parser
 
-from agents.llm import get_client, complete, debug_response, debug_request
+from agents.llm import get_client, complete, debug_response, debug_request, strip_thinking
 
 # ── Language parsers (reuse same registry pattern as context_agent) ──
 
@@ -235,7 +235,7 @@ def _generate_changelog(client, filename: str, issues: list[dict], description: 
     ]
     debug_request("Documentation/changelog", messages)
     resp = complete(client, messages, temperature=0.1)
-    content = resp.choices[0].message.content.strip()
+    content = strip_thinking(resp.choices[0].message.content)
     debug_response("Documentation/changelog", content)
     return content
 

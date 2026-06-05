@@ -42,15 +42,20 @@ def debug_request(label: str, messages: list[dict]) -> None:
         print(f"[DEBUG:{label}:REQUEST]\n{body}\n[/DEBUG]")
 
 
+def strip_thinking(text: str) -> str:
+    """Remove thinking block content. Handles both <think>...</think> and
+    responses where the API strips the opening tag but keeps </think>."""
+    if "</think>" in text:
+        return text.split("</think>", 1)[-1].strip()
+    return text.strip()
+
+
 def parse_json(text: str) -> dict:
     """
     Robustly extract JSON from an LLM response.
-    Handles: thinking blocks (<think>...</think>), markdown fences, leading prose.
+    Handles: thinking blocks, markdown fences, leading prose.
     """
-    raw = text.strip()
-
-    # Strip thinking blocks (Qwen3 and similar models)
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    raw = strip_thinking(text)
 
     # Strip markdown fences
     if raw.startswith("```"):

@@ -93,6 +93,9 @@ def vcs_setup(state: PipelineState) -> dict:
         print(f"[VCS] Cloned  : {git_link} → {repo_dir}")
         print(f"[VCS] Checkout: {commit_hash[:12]}")
 
+    default_branch = repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
+    repo.git.checkout(default_branch)
+    print(f"[VCS] Checked out: {default_branch}")
     repo.git.checkout("-b", branch_name)
     print(f"[VCS] Branch  : {branch_name}")
 
