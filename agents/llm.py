@@ -5,6 +5,7 @@ from openai import OpenAI
 
 MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "8192"))
+NUM_CTX = int(os.environ.get("NUM_CTX", "32768"))
 _DEBUG_LEVEL = (
     int(os.environ.get("DEBUG", "0"))
     if os.environ.get("DEBUG", "").isdigit()
@@ -21,6 +22,7 @@ def get_client() -> OpenAI:
 
 def complete(client: OpenAI, messages: list[dict], temperature: float = 0.1, **kwargs):
     kwargs.setdefault("max_tokens", MAX_TOKENS)
+    kwargs.setdefault("extra_body", {"num_ctx": NUM_CTX})
     return client.chat.completions.create(
         model=MODEL,
         messages=messages,
