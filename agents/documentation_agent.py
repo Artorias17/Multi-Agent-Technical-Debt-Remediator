@@ -143,7 +143,16 @@ def _insert_docstring(source: str, language: str, fn_name: str, docstring: str) 
     if node is None:
         return source   # function not found; leave untouched
 
-    has_doc, doc_start, doc_end = _has_existing_docstring(node, source_bytes, language)
+    # For arrow functions assigned to variables, anchor on the declaration not the function
+    anchor = node
+    if node.type == "arrow_function":
+        parent = node.parent
+        if parent and parent.type == "variable_declarator":
+            grandparent = parent.parent
+            if grandparent and grandparent.type in ("lexical_declaration", "variable_declaration"):
+                anchor = grandparent
+
+    has_doc, doc_start, doc_end = _has_existing_docstring(anchor, source_bytes, language)
 
     if language == "python":
         # Docstring goes inside the function body, after the def line
@@ -153,25 +162,21 @@ def _insert_docstring(source: str, language: str, fn_name: str, docstring: str) 
         indent = " " * (node.start_point[1] + 4)
         indented_doc = textwrap.indent(docstring, indent)
         if has_doc:
-            # Replace existing docstring inside body
             new_bytes = source_bytes[:doc_start] + indented_doc.encode("utf-8") + source_bytes[doc_end:]
         else:
-            # Insert after the colon / first child of block
-            insert_at = body.start_byte + 1   # just after the opening {
-            # Find first newline after block start
             nl = source_bytes.find(b"\n", body.start_byte)
             insert_at = nl + 1 if nl != -1 else body.start_byte + 1
             new_bytes = source_bytes[:insert_at] + (indent + docstring + "\n").encode("utf-8") + source_bytes[insert_at:]
         return new_bytes.decode("utf-8", errors="replace")
 
-    # Java / JS / TS / C# — docstring precedes the function
-    indent = " " * node.start_point[1]
+    # Java / JS / TS / C# — docstring precedes the declaration
+    indent = " " * anchor.start_point[1]
     indented_doc = textwrap.indent(docstring, indent)
 
     if has_doc:
         new_bytes = source_bytes[:doc_start] + indented_doc.encode("utf-8") + source_bytes[doc_end:]
     else:
-        insert_at = node.start_byte
+        insert_at = anchor.start_byte
         new_bytes = source_bytes[:insert_at] + (indented_doc + "\n" + indent).encode("utf-8") + source_bytes[insert_at:]
 
     return new_bytes.decode("utf-8", errors="replace")
