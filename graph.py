@@ -14,7 +14,6 @@ builder = StateGraph(PipelineState)
 builder.add_node("vcs_setup", vcs_setup)
 builder.add_node("vcs_commit_chunk", vcs_commit_chunk)
 builder.add_node("vcs_finalize", vcs_finalize)
-
 builder.add_node("orchestrator", orchestrator_node)
 builder.add_node("context_agent", context_node)
 builder.add_node("summarizer_agent", summarizer_node)
@@ -31,13 +30,13 @@ builder.add_conditional_edges(
     "orchestrator",
     route_orchestrator,
     {
-        "vcs_setup":          "vcs_setup",
-        "context_agent":      "context_agent",
-        "summarizer_agent":   "summarizer_agent",
-        "remediation_agent":  "remediation_agent",
-        "documentation_agent":"documentation_agent",
-        "vcs_commit_chunk":   "vcs_commit_chunk",
-        "vcs_finalize":       "vcs_finalize",
+        "vcs_setup": "vcs_setup",
+        "context_agent": "context_agent",
+        "summarizer_agent": "summarizer_agent",
+        "remediation_agent": "remediation_agent",
+        "documentation_agent": "documentation_agent",
+        "vcs_commit_chunk": "vcs_commit_chunk",
+        "vcs_finalize": "vcs_finalize",
     },
 )
 
