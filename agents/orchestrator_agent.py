@@ -1,5 +1,4 @@
 from pathlib import Path
-
 from state import PipelineState
 
 MAX_RETRIES = 3
@@ -15,63 +14,30 @@ SEVERITY_WEIGHT = {
 # ── Chunk building ───────────────────────────────────────────
 
 
-# TODO: Update priority formula once the new dataset provides per-file
-# cognitive_complexity and line_coverage. Current formula uses only
-# fields present in the issue list (severity, effort_minutes, count).
 def _build_chunks(report: dict) -> list[dict]:
     """
-    Group issues by file (component), compute a priority score per chunk,
-    and return chunks sorted highest priority first.
-
-    Priority score = 0.5 * norm(max_severity)
-                   + 0.3 * norm(sum_effort)
-                   + 0.2 * norm(issue_count)
+    Group issues by file (component) and sort by max severity descending,
+    breaking ties by issue count descending.
     """
     issues = report.get("issues", [])
 
-    # Group by file
     file_map: dict[str, list[dict]] = {}
     for issue in issues:
         comp = issue.get("component") or "unknown"
         file_map.setdefault(comp, []).append(issue)
 
-    raw_chunks = []
+    chunks = []
     for file_path, file_issues in file_map.items():
         max_sev = max(
             SEVERITY_WEIGHT.get(i.get("severity", "INFO"), 1) for i in file_issues
         )
-        sum_effort = sum(i.get("effort_minutes") or 0 for i in file_issues)
-        count = len(file_issues)
-        raw_chunks.append(
-            {
-                "file": file_path,
-                "issues": file_issues,
-                "_max_sev": max_sev,
-                "_sum_effort": sum_effort,
-                "_count": count,
-            }
-        )
+        chunks.append({
+            "file": file_path,
+            "issues": file_issues,
+            "priority_score": max_sev,
+        })
 
-    if not raw_chunks:
-        return []
-
-    # Normalize each dimension to [0, 1] then compute weighted score
-    max_sev_val = max(c["_max_sev"] for c in raw_chunks) or 1
-    max_effort_val = max(c["_sum_effort"] for c in raw_chunks) or 1
-    max_count_val = max(c["_count"] for c in raw_chunks) or 1
-
-    for chunk in raw_chunks:
-        chunk["priority_score"] = round(
-            0.5 * (chunk["_max_sev"] / max_sev_val)
-            + 0.3 * (chunk["_sum_effort"] / max_effort_val)
-            + 0.2 * (chunk["_count"] / max_count_val),
-            4,
-        )
-        del chunk["_max_sev"]
-        del chunk["_sum_effort"]
-        del chunk["_count"]
-
-    return sorted(raw_chunks, key=lambda c: c["priority_score"], reverse=True)
+    return sorted(chunks, key=lambda c: (c["priority_score"], len(c["issues"])), reverse=True)
 
 
 def _build_rule_cache(report: dict) -> dict[str, str | None]:
@@ -308,7 +274,8 @@ def orchestrator_node(state: PipelineState) -> dict:
             )
             return {
                 "attempt": new_attempt,
-                "rejection_history": state.get("rejection_history", []) + [rejection_entry],
+                "rejection_history": state.get("rejection_history", [])
+                + [rejection_entry],
                 "next_agent": "remediation",
             }
 
@@ -334,7 +301,10 @@ def orchestrator_node(state: PipelineState) -> dict:
     # ── Chunk committed → advance to next chunk ──────────────
     if event == "chunk_committed":
         print(f"[Orchestrator] Chunk committed — advancing")
-        return {**_next_chunk_or_finalize(state, chunk_index, chunks), "last_event": None}
+        return {
+            **_next_chunk_or_finalize(state, chunk_index, chunks),
+            "last_event": None,
+        }
 
     # ── Documentation done → advance to next function (or chunk)
     if event == "documentation_done":
