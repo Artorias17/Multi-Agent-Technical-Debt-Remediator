@@ -1,5 +1,6 @@
 import re
 import textwrap
+import time
 from pathlib import Path
 
 from state import PipelineState
@@ -259,6 +260,7 @@ def documentation_node(state: PipelineState) -> dict:
     remediation_status = state.get("remediation_status", "passed")
 
     client = get_client()
+    node_start = time.time()
     primary_description = summary[0]["description"] if summary else ""
 
     # Patch is already on disk (written by validation agent).
@@ -319,8 +321,10 @@ def documentation_node(state: PipelineState) -> dict:
         "changelog_entry": commit_message,
     }
 
+    elapsed = round(time.time() - node_start, 2)
     return {
         "commit_message": commit_message,
         "approved": [approved_item],
+        "agent_durations": {**(state.get("agent_durations") or {}), "documentation": elapsed},
         "last_event": "documentation_done",
     }

@@ -2,13 +2,11 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-
 import tempfile
-
 from state import PipelineState
-
 from git import Repo
 from github import Github
+from checkpoint import write_header, write_footer
 
 
 def _get_github_client() -> Github:
@@ -99,6 +97,14 @@ def vcs_setup(state: PipelineState) -> dict:
     repo.git.checkout("-b", branch_name)
     print(f"[VCS] Branch  : {branch_name}")
 
+    checkpoint_path = state.get("checkpoint_path")
+    if checkpoint_path:
+        write_header(
+            Path(checkpoint_path),
+            branch_name,
+            datetime.now(timezone.utc).isoformat(),
+        )
+
     return {
         "repo_path": repo_dir,
         "branch_name": branch_name,
@@ -113,7 +119,9 @@ def vcs_commit_chunk(state: PipelineState) -> dict:
     file_path = ctx.get("file_path", "")
     approved = state.get("approved") or []
 
-    file_entries = [item for item in approved if item["patch"]["target_file"] == file_path]
+    file_entries = [
+        item for item in approved if item["patch"]["target_file"] == file_path
+    ]
 
     if not file_entries:
         print(f"[VCS] No approved patches for {Path(file_path).name} — skipping commit")
@@ -126,10 +134,14 @@ def vcs_commit_chunk(state: PipelineState) -> dict:
         print(f"[VCS] No changes to commit for {Path(file_path).name} — skipping")
         return {"last_event": "chunk_committed"}
 
-    rule_keys = [k for item in file_entries for k in (item["patch"].get("rule_key") or [])]
+    rule_keys = [
+        k for item in file_entries for k in (item["patch"].get("rule_key") or [])
+    ]
     rule_str = rule_keys[0] if rule_keys else "multiple"
     changelog = "\n".join(
-        item.get("changelog_entry", "") for item in file_entries if item.get("changelog_entry")
+        item.get("changelog_entry", "")
+        for item in file_entries
+        if item.get("changelog_entry")
     )
 
     msg = _build_commit_message(
@@ -173,10 +185,16 @@ def vcs_finalize(state: PipelineState) -> dict:
     )
     print(f"[VCS] PR opened: {pr.html_url}")
 
+    checkpoint_path = state.get("checkpoint_path")
+    if checkpoint_path:
+        write_footer(
+            Path(checkpoint_path),
+            datetime.now(timezone.utc).isoformat(),
+            pr.html_url,
+        )
+
     return {
         "vcs_mode": "done",
         "pr_url": pr.html_url,
         "pr_number": pr.number,
     }
-
-

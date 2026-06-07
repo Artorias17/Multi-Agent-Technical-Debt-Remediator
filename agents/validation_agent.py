@@ -1,5 +1,6 @@
 import ast
 import json
+import time
 from pathlib import Path
 
 from agents.llm import get_client, complete, debug_response, debug_request, parse_json
@@ -204,7 +205,9 @@ def validation_node(state: PipelineState) -> dict:
         )},
     ]
     debug_request("Validation", review_messages)
+    llm_start = time.time()
     resp = complete(client, review_messages, temperature=0.1)
+    llm_elapsed = round(time.time() - llm_start, 2)
 
     debug_response("Validation", resp.choices[0].message.content)
     try:
@@ -214,6 +217,8 @@ def validation_node(state: PipelineState) -> dict:
 
     passed = result.get("passed", False)
     print(f"[Validation] {'PASSED' if passed else 'FAILED'}: {result.get('reason', '')}")
+
+    durations = {**(state.get("agent_durations") or {}), "validation": llm_elapsed}
 
     if passed:
         repo_path = state.get("repo_path")
@@ -225,9 +230,11 @@ def validation_node(state: PipelineState) -> dict:
             "validation": result,
             "patched_code": patched_code,
             "current_code": patched_code,
+            "agent_durations": durations,
             "last_event": "validation_passed",
         }
     return {
         "validation": result,
+        "agent_durations": durations,
         "last_event": "validation_failed",
     }

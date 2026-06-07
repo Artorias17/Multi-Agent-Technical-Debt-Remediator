@@ -1,3 +1,5 @@
+import time
+
 from agents.llm import get_client, complete, debug_response, debug_request, parse_json
 from state import PipelineState
 
@@ -55,4 +57,10 @@ def summarizer_node(state: PipelineState) -> dict:
     client = get_client()
     fn = functions[0]
     print(f"[Summarizer] Describing function: {fn['name']}")
-    return {"summary": [_describe_function(client, language, fn)]}
+    start = time.time()
+    result = _describe_function(client, language, fn)
+    elapsed = round(time.time() - start, 2)
+    return {
+        "summary": [result],
+        "agent_durations": {**(state.get("agent_durations") or {}), "summarizer": elapsed},
+    }

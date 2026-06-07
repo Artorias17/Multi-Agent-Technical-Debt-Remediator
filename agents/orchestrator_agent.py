@@ -1,5 +1,7 @@
+import time
 from pathlib import Path
 from state import PipelineState
+from checkpoint import write_issues
 
 MAX_RETRIES = 3
 
@@ -31,13 +33,17 @@ def _build_chunks(report: dict) -> list[dict]:
         max_sev = max(
             SEVERITY_WEIGHT.get(i.get("severity", "INFO"), 1) for i in file_issues
         )
-        chunks.append({
-            "file": file_path,
-            "issues": file_issues,
-            "priority_score": max_sev,
-        })
+        chunks.append(
+            {
+                "file": file_path,
+                "issues": file_issues,
+                "priority_score": max_sev,
+            }
+        )
 
-    return sorted(chunks, key=lambda c: (c["priority_score"], len(c["issues"])), reverse=True)
+    return sorted(
+        chunks, key=lambda c: (c["priority_score"], len(c["issues"])), reverse=True
+    )
 
 
 def _build_rule_cache(report: dict) -> dict[str, str | None]:
@@ -72,6 +78,8 @@ def _reset_chunk_state() -> dict:
         "remediation_status": None,
         "remediation_reason": None,
         "new_functions": [],
+        "agent_durations": {},
+        "function_start_time": None,
     }
 
 
@@ -88,6 +96,8 @@ def _reset_function_state() -> dict:
         "remediation_status": None,
         "remediation_reason": None,
         "new_functions": [],
+        "agent_durations": {},
+        "function_start_time": None,
     }
 
 
@@ -147,8 +157,45 @@ def _advance_function(state: PipelineState) -> dict:
         "function_index": next_index,
         "current_issues": issues,
         "context": {**current_context, "functions": [fn]},
+        "function_start_time": time.time(),
         "next_agent": "summarizer",
     }
+
+
+# ── Checkpoint writer ─────────────────────────────────────────
+
+
+def _write_checkpoint_entries(state: PipelineState, resolved: bool) -> None:
+    path = state.get("checkpoint_path")
+    if not path:
+        return
+    issues = state.get("current_issues") or []
+    ctx = state.get("context") or {}
+    fn_name = ((ctx.get("functions") or [{}])[0]).get("name", "?")
+    agent_durations = state.get("agent_durations") or {}
+    rejection_history = state.get("rejection_history") or []
+    start_time = state.get("function_start_time")
+    total = round(time.time() - start_time, 2) if start_time else None
+
+    rejection_reasons = [
+        f"Attempt {r.get('attempt', '?')}: {r.get('reason', '')}"
+        for r in rejection_history
+    ]
+    entries = [
+        {
+            "id": issue.get("id", issue.get("key", "?")),
+            "rule": issue.get("rule", "?"),
+            "severity": issue.get("severity", "?"),
+            "file": ctx.get("file_path", "?"),
+            "function": fn_name,
+            "resolved": resolved,
+            "rejection_reasons": rejection_reasons,
+            "agent_durations": agent_durations,
+            "total_duration_seconds": total,
+        }
+        for issue in issues
+    ]
+    write_issues(Path(path), entries)
 
 
 # ── Conditional edge (imported by graph.py) ──────────────────
@@ -238,7 +285,11 @@ def orchestrator_node(state: PipelineState) -> dict:
             f"[Orchestrator] Starting function 0: "
             f"`{first['fn']['name']}` ({len(first['issues'])} issue(s)) in {file_name}"
         )
-        return {"next_agent": "summarizer", "last_event": None}
+        return {
+            "function_start_time": time.time(),
+            "next_agent": "summarizer",
+            "last_event": None,
+        }
 
     # ── Validation passed → documentation (or skip if no fix) ─
     if event == "validation_passed":
@@ -251,6 +302,7 @@ def orchestrator_node(state: PipelineState) -> dict:
             f"(`{fn_name}`) — advancing"
         )
         if state.get("remediation_status") == "no_fix_needed":
+            _write_checkpoint_entries(state, resolved=False)
             return {**_advance_function(state), "last_event": None}
         return {"next_agent": "documentation", "last_event": None}
 
@@ -283,6 +335,7 @@ def orchestrator_node(state: PipelineState) -> dict:
             f"[Orchestrator] Validation FAILED — retries exhausted "
             f"(`{fn_name}`), skipping function"
         )
+        _write_checkpoint_entries(state, resolved=False)
         failed_entry = {
             "task": {
                 "rule_key": [i.get("rule") for i in state.get("current_issues", [])],
@@ -312,6 +365,7 @@ def orchestrator_node(state: PipelineState) -> dict:
             "name", "?"
         )
         print(f"[Orchestrator] Documentation DONE (`{fn_name}`) — advancing")
+        _write_checkpoint_entries(state, resolved=True)
         return {**_advance_function(state), "last_event": None}
 
     # Fallback

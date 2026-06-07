@@ -1,4 +1,5 @@
 import json
+import time
 
 from agents.llm import get_client, complete, debug_response, debug_request, parse_json
 from state import PipelineState
@@ -128,6 +129,7 @@ def remediation_node(state: PipelineState) -> dict:
     name_inventory = "\n".join(ctx.get("name_inventory", [])) or "(none)"
 
     client = get_client()
+    node_start = time.time()
 
     # ── Step 1: triage ───────────────────────────────────────
     print(f"[Remediation] Triaging {len(issues)} issue(s) in {ctx['file_path']}")
@@ -150,12 +152,14 @@ def remediation_node(state: PipelineState) -> dict:
 
     if not triage.get("fix_needed", True):
         print(f"[Remediation] No fix needed: {triage.get('reason')}")
+        elapsed = round(time.time() - node_start, 2)
         return {
             "replacement": None,
             "helpers": [],
             "remediation_status": "no_fix_needed",
             "remediation_reason": triage.get("reason", ""),
             "new_functions": [],
+            "agent_durations": {**(state.get("agent_durations") or {}), "remediation": elapsed},
         }
 
     # ── Step 2: generate replacement ────────────────────────
@@ -187,32 +191,38 @@ def remediation_node(state: PipelineState) -> dict:
         helpers = result.get("helpers", [])
     except (json.JSONDecodeError, KeyError):
         print("[Remediation] Could not parse replacement from LLM response")
+        elapsed = round(time.time() - node_start, 2)
         return {
             "replacement": None,
             "helpers": [],
             "remediation_status": "failed",
             "remediation_reason": "LLM response did not contain parseable replacement JSON",
             "new_functions": [],
+            "agent_durations": {**(state.get("agent_durations") or {}), "remediation": elapsed},
         }
 
     if not replacement:
         print("[Remediation] Empty replacement in LLM response")
+        elapsed = round(time.time() - node_start, 2)
         return {
             "replacement": None,
             "helpers": [],
             "remediation_status": "failed",
             "remediation_reason": "LLM returned empty replacement function",
             "new_functions": [],
+            "agent_durations": {**(state.get("agent_durations") or {}), "remediation": elapsed},
         }
 
     new_functions = [h["name"] for h in helpers if h.get("name")]
     if new_functions:
         print(f"[Remediation] New helpers: {new_functions}")
 
+    elapsed = round(time.time() - node_start, 2)
     return {
         "replacement": replacement,
         "helpers": helpers,
         "remediation_status": "passed",
         "remediation_reason": triage.get("reason", ""),
         "new_functions": new_functions,
+        "agent_durations": {**(state.get("agent_durations") or {}), "remediation": elapsed},
     }

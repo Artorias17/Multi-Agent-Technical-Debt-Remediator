@@ -12,10 +12,12 @@ import json
 import shutil
 import sys
 from dotenv import load_dotenv
-from graph import graph
-from state import initialize_pipeline_state
 
 load_dotenv()
+
+from graph import graph
+from state import initialize_pipeline_state
+from checkpoint import get_project_key, checkpoint_path as make_checkpoint_path
 
 
 def main():
@@ -40,7 +42,11 @@ def main():
         print(f"Repo    : {args.project_dir} (local)")
     print()
 
+    project_key = get_project_key(report)
+    ckpt_path = make_checkpoint_path(project_key)
+
     initial_state = initialize_pipeline_state(report, project_dir=args.project_dir)
+    initial_state["checkpoint_path"] = str(ckpt_path)
     result = {}
 
     try:
@@ -64,6 +70,7 @@ def main():
     print(f"  Approved : {len(approved)} file(s)")
     print(f"  Failed   : {len(failed)} file(s)")
     print(f"  PR       : {pr_url}")
+    print(f"  Checkpoint: {ckpt_path}")
 
 
 if __name__ == "__main__":

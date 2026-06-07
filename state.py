@@ -48,6 +48,11 @@ class PipelineState(TypedDict):
     functions_to_process: list    # [{fn: dict, issues: list}] sorted desc by start line
     current_code: str             # evolving file content; accumulates successful patches
 
+    # Checkpoint / audit log
+    checkpoint_path: Optional[str]       # path to checkpoint_<project>.jsonl
+    agent_durations: dict                # {agent_name: seconds}; merged per function
+    function_start_time: Optional[float] # wall-clock set when dispatching to summarizer
+
     # Terminal collections
     approved: Annotated[list, operator.add]
     failed: Annotated[list, operator.add]
@@ -87,4 +92,7 @@ def initialize_pipeline_state(
         "function_index": 0,
         "functions_to_process": [],
         "current_code": "",
+        "checkpoint_path": None,
+        "agent_durations": {},
+        "function_start_time": None,
     }
