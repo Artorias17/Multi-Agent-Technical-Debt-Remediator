@@ -223,6 +223,7 @@ def fetch_report(
         text_range = i.get("textRange") or {}
         issues.append(
             {
+                "id": i.get("key"),
                 "rule": i.get("rule"),
                 "type": i.get("type"),
                 "severity": i.get("severity"),
