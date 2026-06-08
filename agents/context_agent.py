@@ -155,8 +155,9 @@ def _extract_functions_ts(
             end_line = node.end_point[0] + 1
             if any(start_line <= ln <= end_line for ln in target_set):
                 name = _node_name(node, source_bytes)
-                if name not in seen:
-                    seen[name] = {
+                key = (name, start_line)
+                if key not in seen:
+                    seen[key] = {
                         "name": name,
                         "start": start_line,
                         "end": end_line,
