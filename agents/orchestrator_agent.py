@@ -165,7 +165,7 @@ def _advance_function(state: PipelineState) -> dict:
 # ── Checkpoint writer ─────────────────────────────────────────
 
 
-def _write_checkpoint_entries(state: PipelineState, resolved: bool) -> None:
+def _write_checkpoint_entries(state: PipelineState, resolved: bool, extra_rejection: dict | None = None) -> None:
     path = state.get("checkpoint_path")
     if not path:
         return
@@ -173,7 +173,9 @@ def _write_checkpoint_entries(state: PipelineState, resolved: bool) -> None:
     ctx = state.get("context") or {}
     fn_name = ((ctx.get("functions") or [{}])[0]).get("name", "?")
     agent_durations = state.get("agent_durations") or {}
-    rejection_history = state.get("rejection_history") or []
+    rejection_history = list(state.get("rejection_history") or [])
+    if extra_rejection:
+        rejection_history.append(extra_rejection)
     start_time = state.get("function_start_time")
     total = round(time.time() - start_time, 2) if start_time else None
 
@@ -271,11 +273,24 @@ def orchestrator_node(state: PipelineState) -> dict:
         functions_to_process = state.get("functions_to_process", [])
         file_name = Path(current["file"]).name
 
+        # Skip functions whose issues are all already in the checkpoint
+        checkpointed_ids = set(state.get("checkpointed_issue_ids") or [])
+        if checkpointed_ids:
+            before = len(functions_to_process)
+            functions_to_process = [
+                entry for entry in functions_to_process
+                if not all(i.get("id", "") in checkpointed_ids for i in entry["issues"])
+            ]
+            skipped = before - len(functions_to_process)
+            if skipped:
+                print(f"[Orchestrator] Skipping {skipped} already-checkpointed function(s) in {file_name}")
+
         if not functions_to_process:
             print(
                 f"[Orchestrator] No processable functions in {file_name} — skipping chunk"
             )
             return {
+                "functions_to_process": [],
                 **_next_chunk_or_finalize(state, chunk_index, chunks),
                 "last_event": None,
             }
@@ -286,6 +301,7 @@ def orchestrator_node(state: PipelineState) -> dict:
             f"`{first['fn']['name']}` ({len(first['issues'])} issue(s)) in {file_name}"
         )
         return {
+            "functions_to_process": functions_to_process,
             "function_start_time": time.time(),
             "next_agent": "summarizer",
             "last_event": None,
@@ -332,10 +348,10 @@ def orchestrator_node(state: PipelineState) -> dict:
             }
 
         print(
-            f"[Orchestrator] Validation FAILED — retries exhausted "
+            f"[Orchestrator] Validation FAILED (attempt {attempt}) — retries exhausted "
             f"(`{fn_name}`), skipping function"
         )
-        _write_checkpoint_entries(state, resolved=False)
+        _write_checkpoint_entries(state, resolved=False, extra_rejection=rejection_entry)
         failed_entry = {
             "task": {
                 "rule_key": [i.get("rule") for i in state.get("current_issues", [])],

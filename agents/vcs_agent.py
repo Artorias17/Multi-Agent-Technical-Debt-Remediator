@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 from state import PipelineState
 from git import Repo
-from github import Github
+from github import Github, GithubException
 from checkpoint import write_header, write_footer
 
 
@@ -74,8 +74,7 @@ def _build_pr_body(approved: list, failed: list, commit_count: int) -> str:
 def vcs_setup(state: PipelineState) -> dict:
     """Create feature branch on an existing local clone, or clone if project_dir not set."""
     report = state["report"]
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    branch_name = f"td-agent/fix-{timestamp}"
+    resume_branch = state.get("resume_branch")
 
     project_dir = state.get("project_dir")
     if project_dir:
@@ -91,19 +90,32 @@ def vcs_setup(state: PipelineState) -> dict:
         print(f"[VCS] Cloned  : {git_link} → {repo_dir}")
         print(f"[VCS] Checkout: {commit_hash[:12]}")
 
-    default_branch = repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
-    repo.git.checkout(default_branch)
-    print(f"[VCS] Checked out: {default_branch}")
-    repo.git.checkout("-b", branch_name)
-    print(f"[VCS] Branch  : {branch_name}")
+    if resume_branch:
+        repo.git.checkout(resume_branch)
+        branch_name = resume_branch
+        print(f"[VCS] Resumed branch: {branch_name}")
 
-    checkpoint_path = state.get("checkpoint_path")
-    if checkpoint_path:
-        write_header(
-            Path(checkpoint_path),
-            branch_name,
-            datetime.now(timezone.utc).isoformat(),
-        )
+        # Window B: commit any uncommitted tracked changes left by the previous run
+        if repo.is_dirty(index=True, working_tree=True, untracked_files=False):
+            repo.git.add("-u")
+            repo.index.commit("resume: commit leftover patches from previous run")
+            print("[VCS] Committed leftover uncommitted patches")
+    else:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        branch_name = f"td-agent/fix-{timestamp}"
+        default_branch = repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
+        repo.git.checkout(default_branch)
+        print(f"[VCS] Checked out: {default_branch}")
+        repo.git.checkout("-b", branch_name)
+        print(f"[VCS] Branch  : {branch_name}")
+
+        checkpoint_path = state.get("checkpoint_path")
+        if checkpoint_path:
+            write_header(
+                Path(checkpoint_path),
+                branch_name,
+                datetime.now(timezone.utc).isoformat(),
+            )
 
     return {
         "repo_path": repo_dir,
@@ -177,13 +189,25 @@ def vcs_finalize(state: PipelineState) -> dict:
     gh_repo = gh.get_repo(_parse_github_repo(report["git_link"]))
     base_branch = gh_repo.default_branch
 
-    pr = gh_repo.create_pull(
-        title=f"[TD Agent] Fix {len(approved)} issue(s) — {branch_name.split('/')[-1]}",
-        body=_build_pr_body(approved, failed, commit_count),
-        head=branch_name,
-        base=base_branch,
-    )
-    print(f"[VCS] PR opened: {pr.html_url}")
+    try:
+        pr = gh_repo.create_pull(
+            title=f"[TD Agent] Fix {len(approved)} issue(s) — {branch_name.split('/')[-1]}",
+            body=_build_pr_body(approved, failed, commit_count),
+            head=branch_name,
+            base=base_branch,
+        )
+        print(f"[VCS] PR opened: {pr.html_url}")
+    except GithubException as exc:
+        if "A pull request already exists" in str(exc):
+            owner = gh_repo.owner.login
+            existing = list(gh_repo.get_pulls(state="open", head=f"{owner}:{branch_name}"))
+            if existing:
+                pr = existing[0]
+                print(f"[VCS] PR already exists: {pr.html_url}")
+            else:
+                raise
+        else:
+            raise
 
     checkpoint_path = state.get("checkpoint_path")
     if checkpoint_path:

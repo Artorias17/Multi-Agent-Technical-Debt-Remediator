@@ -11,13 +11,14 @@ import argparse
 import json
 import shutil
 import sys
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from graph import graph
 from state import initialize_pipeline_state
-from checkpoint import get_project_key, checkpoint_path as make_checkpoint_path
+from checkpoint import get_project_key, checkpoint_path as make_checkpoint_path, read_checkpoint, write_resume_marker
 
 
 def main():
@@ -44,9 +45,24 @@ def main():
 
     project_key = get_project_key(report)
     ckpt_path = make_checkpoint_path(project_key)
+    ckpt_data = read_checkpoint(ckpt_path)
+
+    if ckpt_data["is_complete"]:
+        print("Checkpoint shows a completed run — nothing to resume.")
+        print(f"  Checkpoint: {ckpt_path}")
+        sys.exit(0)
 
     initial_state = initialize_pipeline_state(report, project_dir=args.project_dir)
     initial_state["checkpoint_path"] = str(ckpt_path)
+
+    if ckpt_data["branch"]:
+        checkpointed = ckpt_data["checkpointed_ids"]
+        print(f"Resuming branch : {ckpt_data['branch']}")
+        print(f"Skipping        : {len(checkpointed)} already-checkpointed issue(s)")
+        initial_state["resume_branch"] = ckpt_data["branch"]
+        initial_state["checkpointed_issue_ids"] = list(checkpointed)
+        write_resume_marker(ckpt_path, datetime.now(timezone.utc).isoformat())
+
     result = {}
 
     try:

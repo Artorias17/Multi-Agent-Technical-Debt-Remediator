@@ -32,3 +32,36 @@ def write_issues(path: Path, entries: list[dict]) -> None:
 def write_footer(path: Path, finished_at: str, pr_url: str | None) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"type": "footer", "finished_at": finished_at, "pr_url": pr_url}) + "\n")
+
+
+def write_resume_marker(path: Path, resumed_at: str) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "resume", "resumed_at": resumed_at}) + "\n")
+
+
+def read_checkpoint(path: Path) -> dict:
+    """
+    Returns {"branch": str|None, "checkpointed_ids": set[str], "is_complete": bool}.
+    checkpointed_ids contains the IDs of all issues already recorded in the checkpoint.
+    is_complete is True when a footer line exists (run finished successfully).
+    """
+    result: dict = {"branch": None, "checkpointed_ids": set(), "is_complete": False}
+    if not path.exists():
+        return result
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = rec.get("type")
+            if t == "header":
+                result["branch"] = rec.get("branch")
+            elif t == "issue":
+                result["checkpointed_ids"].add(rec.get("id", ""))
+            elif t == "footer":
+                result["is_complete"] = True
+    return result
