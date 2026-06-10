@@ -6,7 +6,7 @@
   "forwardPorts": [9000, 9092, 5432],
   "features": {
     "ghcr.io/cirolosapio/devcontainers-features/alpine-bash:0": {},
-    "ghcr.io/cirolosapio/devcontainers-features/alpine-git:0": {}
+    "ghcr.io/cirolosapio/devcontainers-features/alpine-git:": {}
   },
   "customizations": {
     "vscode": {
