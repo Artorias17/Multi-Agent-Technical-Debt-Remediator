@@ -268,7 +268,9 @@ def documentation_node(state: PipelineState) -> dict:
     current_source = abs_path.read_text(encoding="utf-8", errors="replace")
 
     # ── Insert docstrings (only when a real fix was applied) ──
-    if summary and remediation_status == "passed":
+    is_snippet = (summary[0]["function_name"] if summary else "") == "<snippet>"
+    final_source = current_source
+    if summary and remediation_status == "passed" and not is_snippet:
         documented_source = current_source
 
         primary_fn = summary[0]["function_name"]
@@ -297,6 +299,7 @@ def documentation_node(state: PipelineState) -> dict:
         syntax_ok, syntax_err = _syntax_check(documented_source, language)
         if syntax_ok:
             abs_path.write_text(documented_source, encoding="utf-8")
+            final_source = documented_source
             print(f"[Documentation] Written with docstrings: {file_path}")
         else:
             print(f"[Documentation] Docstring syntax check failed ({syntax_err}) — patch preserved, docstring skipped")
@@ -325,6 +328,7 @@ def documentation_node(state: PipelineState) -> dict:
     return {
         "commit_message": commit_message,
         "approved": [approved_item],
+        "current_code": final_source,
         "agent_durations": {**(state.get("agent_durations") or {}), "documentation": elapsed},
         "last_event": "documentation_done",
     }

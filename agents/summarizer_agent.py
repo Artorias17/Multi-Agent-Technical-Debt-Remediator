@@ -54,8 +54,16 @@ def summarizer_node(state: PipelineState) -> dict:
         print("[Summarizer] No functions to describe — returning empty summary")
         return {"summary": []}
 
-    client = get_client()
     fn = functions[0]
+    if fn["name"] == "<snippet>":
+        print("[Summarizer] Snippet context — skipping LLM describe")
+        return {
+            "summary": [{"function_name": "<snippet>", "description": "module-level code",
+                         "parameters": [], "returns": "none"}],
+            "agent_durations": {**(state.get("agent_durations") or {}), "summarizer": 0.0},
+        }
+
+    client = get_client()
     print(f"[Summarizer] Describing function: {fn['name']}")
     start = time.time()
     result = _describe_function(client, language, fn)

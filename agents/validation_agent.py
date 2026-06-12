@@ -89,6 +89,15 @@ def _apply_replacement(
     if target_node is None:
         return False, "", f"Function `{fn_name}` not found in source"
 
+    # For arrow functions, splice the full const/let declaration so the
+    # replacement returned by the LLM matches what the LLM was shown
+    if target_node.type == "arrow_function":
+        parent = target_node.parent
+        if parent and parent.type == "variable_declarator":
+            gp = parent.parent
+            if gp and gp.type in ("lexical_declaration", "variable_declaration"):
+                target_node = gp
+
     helper_sources = [h["source"] for h in helpers if h.get("source")]
     helpers_block = ("\n\n".join(helper_sources) + "\n\n") if helper_sources else ""
 
@@ -97,6 +106,21 @@ def _apply_replacement(
     patched = before + helpers_block + replacement + after
 
     return True, patched, ""
+
+
+def _apply_line_replacement(
+    current_code: str, fn_start: int, fn_end: int, replacement: str
+) -> tuple[bool, str, str]:
+    """Replace lines fn_start..fn_end (1-based, inclusive) with replacement text."""
+    lines = current_code.splitlines(keepends=True)
+    start_idx = fn_start - 1
+    end_idx = fn_end
+    if start_idx < 0 or end_idx > len(lines):
+        return False, "", f"Line range {fn_start}-{fn_end} out of bounds ({len(lines)} lines)"
+    repl_lines = replacement.splitlines(keepends=True)
+    if repl_lines and not repl_lines[-1].endswith("\n"):
+        repl_lines[-1] += "\n"
+    return True, "".join(lines[:start_idx] + repl_lines + lines[end_idx:]), ""
 
 
 def _syntax_check(patched_code: str, language: str) -> tuple[bool, str]:
@@ -166,11 +190,19 @@ def validation_node(state: PipelineState) -> dict:
 
     print(f"[Validation] Applying replacement to {ctx['file_path']}")
 
-    if fn_name:
+    is_snippet = fn_name == "<snippet>"
+    if is_snippet:
+        fn_start = fn["start"] if fn else 1
+        fn_end = fn["end"] if fn else 1
+        ok, patched_code, err = _apply_line_replacement(current_code, fn_start, fn_end, replacement)
+        syntax_target = patched_code
+    elif fn_name:
         ok, patched_code, err = _apply_replacement(current_code, language, fn_name, replacement, helpers)
+        syntax_target = replacement
     else:
         patched_code = replacement
         ok, err = True, ""
+        syntax_target = replacement
 
     if not ok:
         print(f"[Validation] Replacement failed to apply: {err}")
@@ -179,9 +211,9 @@ def validation_node(state: PipelineState) -> dict:
             "last_event": "validation_failed",
         }
 
-    # ── Syntax check on replacement function ────────────────
+    # ── Syntax check ─────────────────────────────────────────
     print(f"[Validation] Running syntax check ({language})")
-    syntax_ok, syntax_err = _syntax_check(replacement, language)
+    syntax_ok, syntax_err = _syntax_check(syntax_target, language)
     if not syntax_ok:
         print(f"[Validation] Syntax check FAILED: {syntax_err}")
         return {

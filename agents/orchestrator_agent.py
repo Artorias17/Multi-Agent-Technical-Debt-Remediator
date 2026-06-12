@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 from state import PipelineState
 from checkpoint import write_issues
+from agents.context_agent import signature_from_source
 
 MAX_RETRIES = 3
 
@@ -300,8 +301,11 @@ def orchestrator_node(state: PipelineState) -> dict:
             f"[Orchestrator] Starting function 0: "
             f"`{first['fn']['name']}` ({len(first['issues'])} issue(s)) in {file_name}"
         )
+        current_context = state.get("context") or {}
         return {
             "functions_to_process": functions_to_process,
+            "current_issues": first["issues"],
+            "context": {**current_context, "functions": [first["fn"]]},
             "function_start_time": time.time(),
             "next_agent": "summarizer",
             "last_event": None,
@@ -377,12 +381,28 @@ def orchestrator_node(state: PipelineState) -> dict:
 
     # ── Documentation done → advance to next function (or chunk)
     if event == "documentation_done":
-        fn_name = ((state.get("context") or {}).get("functions") or [{}])[0].get(
-            "name", "?"
-        )
+        ctx = state.get("context") or {}
+        fn = (ctx.get("functions") or [{}])[0]
+        fn_name = fn.get("name", "?")
         print(f"[Orchestrator] Documentation DONE (`{fn_name}`) — advancing")
         _write_checkpoint_entries(state, resolved=True)
-        return {**_advance_function(state), "last_event": None}
+
+        # Update signature inventory so later functions know about new/changed helpers
+        inv = dict(ctx.get("name_inventory") or {})
+        language = ctx.get("language", "")
+        replacement = state.get("replacement") or ""
+        if replacement and fn_name not in ("<anonymous>", "<snippet>", "?"):
+            inv[fn_name] = signature_from_source(fn_name, replacement, language)
+        for helper in (state.get("helpers") or []):
+            h_name = helper.get("name", "")
+            h_src = helper.get("source", "")
+            if h_name and h_src:
+                inv[h_name] = signature_from_source(h_name, h_src, language)
+
+        advanced = _advance_function(state)
+        if inv and "context" in advanced:
+            advanced = {**advanced, "context": {**advanced["context"], "name_inventory": inv}}
+        return {**advanced, "last_event": None}
 
     # Fallback
     return {**_next_chunk_or_finalize(state, chunk_index, chunks), "last_event": None}

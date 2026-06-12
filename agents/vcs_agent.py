@@ -6,7 +6,7 @@ import tempfile
 from state import PipelineState
 from git import Repo
 from github import Github, GithubException
-from checkpoint import write_header, write_footer
+from checkpoint import write_header, write_footer, read_checkpoint_stats
 
 
 def _get_github_client() -> Github:
@@ -35,6 +35,50 @@ def _build_commit_message(rule: str, file: str, changelog: str) -> str:
 
 
 _SEVERITY_ORDER = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
+
+
+def _build_pr_body_from_stats(resolved: list[dict], failed: list[dict], commit_count: int) -> str:
+    total = len(resolved) + len(failed)
+    lines = ["## Technical Debt Agent — Automated Fix PR", ""]
+    lines += [
+        "### Summary",
+        f"- Resolved: {len(resolved)} of {total} issue(s) across {len({i.get('file') for i in resolved})} file(s)",
+        f"- Failed: {len(failed)} issue(s)",
+        f"- Commits: {commit_count}",
+        "",
+    ]
+    if resolved:
+        severity_counts: dict[str, int] = {}
+        for issue in resolved:
+            sev = issue.get("severity", "INFO")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        lines += ["### Severity breakdown (resolved)", ""]
+        for sev in _SEVERITY_ORDER:
+            if sev in severity_counts:
+                lines.append(f"- {sev}: {severity_counts[sev]}")
+        lines.append("")
+
+    first_try = sum(1 for i in resolved if len(i.get("rejection_reasons", [])) == 0)
+    multi_attempt = len(resolved) - first_try
+    no_fix_needed = sum(1 for i in failed if len(i.get("rejection_reasons", [])) == 0)
+    exhausted = len(failed) - no_fix_needed
+    total_attempts = (
+        sum(len(i.get("rejection_reasons", [])) + 1 for i in resolved)
+        + sum(len(i.get("rejection_reasons", [])) for i in failed if i.get("rejection_reasons"))
+        + no_fix_needed
+    )
+    lines += ["### Attempt statistics", ""]
+    lines.append(f"- Total LLM attempts: {total_attempts}")
+    lines.append(f"- Resolved first try: {first_try}")
+    if multi_attempt:
+        lines.append(f"- Resolved after retries: {multi_attempt}")
+    lines.append(f"- Exhausted retries: {exhausted}")
+    if no_fix_needed:
+        lines.append(f"- No fix needed (triage): {no_fix_needed}")
+    lines.append("")
+
+    lines += ["---", "> This PR was opened automatically. Do not merge without review."]
+    return "\n".join(lines)
 
 
 def _build_pr_body(approved: list, failed: list, commit_count: int) -> str:
@@ -177,7 +221,21 @@ def vcs_finalize(state: PipelineState) -> dict:
     branch_name = state["branch_name"]
 
     repo = Repo(repo_path)
-    commit_count = len({item["patch"]["target_file"] for item in approved})
+    checkpoint_path = state.get("checkpoint_path")
+
+    # ── Build PR body always from checkpoint (has full attempt data) ──────────
+    if checkpoint_path:
+        stats = read_checkpoint_stats(Path(checkpoint_path))
+        approved_issues = stats["resolved"]
+        failed_issues = stats["failed"]
+        commit_count = len({i.get("file", "") for i in approved_issues})
+        pr_body = _build_pr_body_from_stats(approved_issues, failed_issues, commit_count)
+        pr_issue_count = len(approved_issues)
+        print(f"[VCS] PR body from checkpoint ({len(approved_issues)} resolved, {len(failed_issues)} failed)")
+    else:
+        commit_count = len({item["patch"]["target_file"] for item in approved})
+        pr_body = _build_pr_body(approved, failed, commit_count)
+        pr_issue_count = len([i for item in approved for i in item["patch"].get("issues", [])])
 
     # ── Push branch ──────────────────────────────────────────
     origin = repo.remote("origin")
@@ -191,8 +249,8 @@ def vcs_finalize(state: PipelineState) -> dict:
 
     try:
         pr = gh_repo.create_pull(
-            title=f"[TD Agent] Fix {len(approved)} issue(s) — {branch_name.split('/')[-1]}",
-            body=_build_pr_body(approved, failed, commit_count),
+            title=f"[TD Agent] Fix {pr_issue_count} issue(s) — {branch_name.split('/')[-1]}",
+            body=pr_body,
             head=branch_name,
             base=base_branch,
         )
@@ -206,10 +264,15 @@ def vcs_finalize(state: PipelineState) -> dict:
                 print(f"[VCS] PR already exists: {pr.html_url}")
             else:
                 raise
+        elif exc.status == 403:
+            print(f"[VCS] GitHub 403 — cannot create PR ({exc.data.get('message', '')}). "
+                  "Check GITHUB_TOKEN scopes.")
+            if checkpoint_path:
+                write_footer(Path(checkpoint_path), datetime.now(timezone.utc).isoformat(), None)
+            return {"vcs_mode": "done", "pr_url": None, "pr_number": None}
         else:
             raise
 
-    checkpoint_path = state.get("checkpoint_path")
     if checkpoint_path:
         write_footer(
             Path(checkpoint_path),

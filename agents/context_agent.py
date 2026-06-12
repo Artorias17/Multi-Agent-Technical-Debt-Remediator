@@ -49,51 +49,82 @@ def _detect_language(file_path: str) -> str | None:
     return _EXT_TO_LANG.get(Path(file_path).suffix.lower())
 
 
-def _extract_import_block(source: str, language: str) -> str:
-    """Return the import section at the top of the file as a single string."""
-    lines = source.splitlines()
-    import_lines: list[str] = []
-
-    if language == "python":
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("import ") or stripped.startswith("from "):
-                import_lines.append(line)
-            elif stripped and not stripped.startswith("#") and import_lines:
-                break
-    elif language == "java":
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("import "):
-                import_lines.append(line)
-            elif stripped and not stripped.startswith("//") and not stripped.startswith("/*") and import_lines:
-                break
-    elif language in ("javascript", "typescript"):
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("import ") or "= require(" in stripped:
-                import_lines.append(line)
-            elif stripped and not stripped.startswith("//") and import_lines:
-                break
-    elif language == "csharp":
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("using "):
-                import_lines.append(line)
-            elif stripped and not stripped.startswith("//") and import_lines:
-                break
-
-    return "\n".join(import_lines)
+_PARAM_NODE_TYPES = {"parameters", "formal_parameters", "parameter_list"}
+_RETURN_ANNOTATION_TYPES = {"type_annotation"}
 
 
-def _extract_name_inventory(tree, source_bytes: bytes, language_key: str) -> list[str]:
-    """Return deduplicated list of all function/method/class names defined in the file."""
+def _extract_signature(node, source_bytes: bytes, name: str) -> str:
+    """Build `name(params) return_type` from tree-sitter nodes; fallback to first line."""
+    params_text = ""
+    return_text = ""
+    for child in node.children:
+        if child.type in _PARAM_NODE_TYPES and not params_text:
+            params_text = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+        elif child.type in _RETURN_ANNOTATION_TYPES and not return_text:
+            return_text = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+    if params_text:
+        sig = f"{name}{params_text}"
+        if return_text:
+            sig += f" {return_text}"
+        return sig
+    return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace").split("\n")[0].strip()
+
+
+def signature_from_source(name: str, source: str, language_key: str) -> str:
+    """Parse a function snippet and return its signature string."""
     cfg = _LANGUAGE_CONFIG.get(language_key)
     if cfg is None:
-        return []
+        return source.split("\n")[0].strip()
+    source_bytes = source.encode("utf-8")
+    from tree_sitter import Parser as _Parser
+    tree = _Parser(cfg["language"]).parse(source_bytes)
+    fn_node_types = cfg["function_nodes"]
+
+    def walk(node):
+        if node.type in fn_node_types and _node_name(node, source_bytes) == name:
+            return node
+        for child in node.children:
+            result = walk(child)
+            if result is not None:
+                return result
+        return None
+
+    node = walk(tree.root_node)
+    if node:
+        return _extract_signature(node, source_bytes, name)
+    return source.split("\n")[0].strip()
+
+
+_IMPORT_NODE_TYPES: dict[str, set[str]] = {
+    "javascript": {"import_statement"},
+    "typescript": {"import_statement"},
+    "python":     {"import_statement", "import_from_statement"},
+    "java":       {"import_declaration"},
+    "csharp":     {"using_directive"},
+}
+
+
+def _extract_import_block(
+    language: str, tree=None, source_bytes: bytes | None = None
+) -> str:
+    """Return the import section at the top of the file as a single string."""
+    if tree is None or source_bytes is None:
+        return ""
+    import_types = _IMPORT_NODE_TYPES.get(language, set())
+    nodes = [c for c in tree.root_node.children if c.type in import_types]
+    return "\n".join(
+        source_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+        for n in nodes
+    )
+
+
+def _extract_name_inventory(tree, source_bytes: bytes, language_key: str) -> dict[str, str]:
+    """Return {name: signature_line} for all functions/methods/classes defined in the file."""
+    cfg = _LANGUAGE_CONFIG.get(language_key)
+    if cfg is None:
+        return {}
 
     function_node_types = cfg["function_nodes"]
-    # Also collect class/interface names
     class_node_types = {
         "java":       {"class_declaration", "interface_declaration", "enum_declaration"},
         "javascript": {"class_declaration"},
@@ -103,16 +134,13 @@ def _extract_name_inventory(tree, source_bytes: bytes, language_key: str) -> lis
     }.get(language_key, set())
 
     all_node_types = function_node_types | class_node_types
-    seen: list[str] = []
+    seen: dict[str, str] = {}
 
     def walk(node):
         if node.type in all_node_types:
-            for child in node.children:
-                if child.type == "identifier":
-                    name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-                    if name not in seen:
-                        seen.append(name)
-                    break
+            name = _node_name(node, source_bytes)
+            if name and name != "<anonymous>" and name not in seen:
+                seen[name] = _extract_signature(node, source_bytes, name)
         for child in node.children:
             walk(child)
 
@@ -133,9 +161,6 @@ def _node_name(node, source_bytes: bytes) -> str:
     return "<anonymous>"
 
 
-_PADDING_LINES = 5
-
-
 def _extract_functions_ts(
     source: str, language_key: str, target_lines: list[int]
 ) -> list[dict]:
@@ -147,21 +172,29 @@ def _extract_functions_ts(
 
     target_set = set(target_lines)
     function_node_types = cfg["function_nodes"]
-    seen: dict[str, dict] = {}
+    seen: dict[tuple, dict] = {}
 
     def walk(node):
         if node.type in function_node_types:
-            start_line = node.start_point[0] + 1   # tree-sitter is 0-indexed
+            start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
             if any(start_line <= ln <= end_line for ln in target_set):
                 name = _node_name(node, source_bytes)
                 key = (name, start_line)
                 if key not in seen:
+                    # For arrow functions, include the full const/let declaration
+                    source_node = node
+                    if node.type == "arrow_function":
+                        parent = node.parent
+                        if parent and parent.type == "variable_declarator":
+                            gp = parent.parent
+                            if gp and gp.type in ("lexical_declaration", "variable_declaration"):
+                                source_node = gp
                     seen[key] = {
                         "name": name,
-                        "start": start_line,
-                        "end": end_line,
-                        "source": source_bytes[node.start_byte:node.end_byte].decode(
+                        "start": source_node.start_point[0] + 1,
+                        "end": source_node.end_point[0] + 1,
+                        "source": source_bytes[source_node.start_byte:source_node.end_byte].decode(
                             "utf-8", errors="replace"
                         ),
                     }
@@ -169,21 +202,10 @@ def _extract_functions_ts(
             walk(child)
 
     walk(tree.root_node)
-
-    lines = source.splitlines()
-    result = []
-    for fn in seen.values():
-        padded_start = max(1, fn["start"] - _PADDING_LINES)
-        padded_end = min(len(lines), fn["end"] + _PADDING_LINES)
-        result.append({
-            **fn,
-            "padded_source": "\n".join(lines[padded_start - 1 : padded_end]),
-            "padded_start": padded_start,
-        })
-    return result
+    return list(seen.values())
 
 
-def _fallback_window(source: str, target_lines: list[int], window: int = 50) -> list[dict]:
+def _fallback_window(source: str, target_lines: list[int], window: int = 5) -> list[dict]:
     lines = source.splitlines()
     if not target_lines:
         return []
@@ -191,8 +213,7 @@ def _fallback_window(source: str, target_lines: list[int], window: int = 50) -> 
     start = max(1, center - window)
     end = min(len(lines), center + window)
     snippet = "\n".join(lines[start - 1 : end])
-    return [{"name": "<snippet>", "start": start, "end": end, "source": snippet,
-             "padded_source": snippet, "padded_start": start}]
+    return [{"name": "<snippet>", "start": start, "end": end, "source": snippet}]
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -281,10 +302,24 @@ def context_node(state: PipelineState) -> dict:
     if not functions and target_lines:
         functions = _fallback_window(full_code, target_lines)
 
-    import_block = _extract_import_block(full_code, language or "")
+    import_block = _extract_import_block(language or "", tree=tree, source_bytes=source_bytes)
     name_inventory = _extract_name_inventory(tree, source_bytes, language or "") if tree else []
 
     functions_to_process = _group_issues_by_function(all_issues, functions)
+
+    # Issues outside every function boundary get a fallback line window
+    matched_ids = {i.get("id") for g in functions_to_process for i in g["issues"]}
+    unmatched = [
+        i for i in all_issues
+        if i.get("start_line") is not None and i.get("id") not in matched_ids
+    ]
+    for issue in unmatched:
+        fb = _fallback_window(full_code, [int(issue["start_line"])])
+        if fb:
+            functions_to_process.append({"fn": fb[0], "issues": [issue]})
+    if unmatched:
+        functions_to_process.sort(key=lambda g: g["fn"]["start"], reverse=True)
+
     print(f"[Context] {len(functions_to_process)} function group(s) to process in {file_path}")
 
     # Seed context with the first function (index 0, which is bottom-most)

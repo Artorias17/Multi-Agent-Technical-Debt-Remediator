@@ -16,7 +16,7 @@ Decide whether a code change is required to resolve them.
 Issues:
 {issues}
 
-Function source:
+Code:
 {source}
 
 Return a JSON object:
@@ -43,7 +43,7 @@ Behavioural contract (DO NOT break this):
 Existing imports (do NOT add any import/using/require not already present):
 {import_block}
 
-Existing names (do NOT reuse any of these names for new helper functions):
+Existing function signatures (do NOT reuse these names for new helpers):
 {name_inventory}
 
 Constraints:
@@ -65,6 +65,32 @@ Return a JSON object with this exact shape:
   ]
 }}
 If no helpers are needed, return an empty array for helpers.
+"""
+
+_SNIPPET_PATCH_USER = """\
+Fix the SonarQube issues listed below in the module-level code shown.
+
+File: {file_path}
+Lines: {fn_start}–{fn_end}
+
+Issues:
+{issues}
+{rejection_block}
+Existing imports (do NOT add any import/using/require not already present):
+{import_block}
+
+Constraints:
+- Do NOT wrap the code in a function or class.
+- Return only the fixed version of exactly the lines shown.
+- Do NOT add new imports.
+
+Current code (lines {fn_start}–{fn_end}):
+```
+{fn_source}
+```
+
+Return a JSON object:
+{{"replacement": "<fixed version of the shown lines>"}}
 """
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -118,6 +144,7 @@ def remediation_node(state: PipelineState) -> dict:
     fn = functions[0] if functions else None
     fn_source = fn["source"] if fn else ctx.get("full_code", "")
     fn_start = fn["start"] if fn else 1
+    fn_end = fn["end"] if fn else 1
     fn_name = fn["name"] if fn else "<unknown>"
 
     if fn:
@@ -126,7 +153,11 @@ def remediation_node(state: PipelineState) -> dict:
 
     issue_text = _format_issues(issues)
     import_block = ctx.get("import_block", "(none)") or "(none)"
-    name_inventory = "\n".join(ctx.get("name_inventory", [])) or "(none)"
+    inv = ctx.get("name_inventory") or {}
+    if isinstance(inv, dict):
+        name_inventory = "\n".join(f"{n}: {s}" for n, s in inv.items()) or "(none)"
+    else:
+        name_inventory = "\n".join(inv) or "(none)"
 
     client = get_client()
     node_start = time.time()
@@ -164,9 +195,19 @@ def remediation_node(state: PipelineState) -> dict:
 
     # ── Step 2: generate replacement ────────────────────────
     print("[Remediation] Generating replacement")
-    patch_messages = [
-        {"role": "system", "content": _PATCH_SYSTEM.format(language=language)},
-        {"role": "user", "content": _PATCH_USER.format(
+    is_snippet = fn_name == "<snippet>"
+    if is_snippet:
+        patch_user = _SNIPPET_PATCH_USER.format(
+            file_path=ctx["file_path"],
+            fn_start=fn_start,
+            fn_end=fn_end,
+            issues=issue_text,
+            rejection_block=_format_rejection_block(rejection_history),
+            import_block=import_block,
+            fn_source=fn_source,
+        )
+    else:
+        patch_user = _PATCH_USER.format(
             language=language,
             file_path=ctx["file_path"],
             issues=issue_text,
@@ -177,7 +218,10 @@ def remediation_node(state: PipelineState) -> dict:
             fn_source=fn_source,
             fn_start=fn_start,
             fn_name=fn_name,
-        )},
+        )
+    patch_messages = [
+        {"role": "system", "content": _PATCH_SYSTEM.format(language=language)},
+        {"role": "user", "content": patch_user},
     ]
     debug_request("Remediation/patch", patch_messages)
     patch_resp = complete(client, patch_messages, temperature=0.2)
@@ -213,6 +257,8 @@ def remediation_node(state: PipelineState) -> dict:
             "agent_durations": {**(state.get("agent_durations") or {}), "remediation": elapsed},
         }
 
+    if is_snippet:
+        helpers = []
     new_functions = [h["name"] for h in helpers if h.get("name")]
     if new_functions:
         print(f"[Remediation] New helpers: {new_functions}")

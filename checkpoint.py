@@ -39,6 +39,29 @@ def write_resume_marker(path: Path, resumed_at: str) -> None:
         f.write(json.dumps({"type": "resume", "resumed_at": resumed_at}) + "\n")
 
 
+def read_checkpoint_stats(path: Path) -> dict:
+    """Return {"resolved": list[dict], "failed": list[dict]} from issue lines in checkpoint.
+    Deduplicates by issue ID — last write wins — to handle partial-write-then-resume."""
+    seen: dict[str, dict] = {}
+    if not path.exists():
+        return {"resolved": [], "failed": []}
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") != "issue":
+                continue
+            seen[rec.get("id", "")] = rec
+    resolved = [r for r in seen.values() if r.get("resolved")]
+    failed = [r for r in seen.values() if not r.get("resolved")]
+    return {"resolved": resolved, "failed": failed}
+
+
 def read_checkpoint(path: Path) -> dict:
     """
     Returns {"branch": str|None, "checkpointed_ids": set[str], "is_complete": bool}.
