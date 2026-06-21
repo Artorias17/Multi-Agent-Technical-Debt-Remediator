@@ -37,75 +37,22 @@ def _format_issues(issues: list[dict]) -> str:
 
 def _apply_replacement(
     current_code: str,
-    language: str,
-    fn_name: str,
     replacement: str,
     helpers: list[dict],
+    splice_start: int,
+    splice_end: int,
 ) -> tuple[bool, str, str]:
     """
-    Splice replacement function + helpers into current_code using tree-sitter byte offsets.
-    Helpers are inserted immediately before the target function.
-    Returns (success, patched_content, error_message).
+    Splice replacement + helpers into current_code at the given byte offsets.
+    splice_start/splice_end come from context_agent and cover the full outermost
+    statement (including any export_statement wrapper).
     """
-    from agents.context_agent import _LANGUAGE_CONFIG
-    from tree_sitter import Parser
-
-    cfg = _LANGUAGE_CONFIG.get(language)
-    if cfg is None:
-        return False, "", f"Unsupported language: {language}"
-
-    source_bytes = current_code.encode("utf-8")
-    parser = Parser(cfg["language"])
-    tree = parser.parse(source_bytes)
-    fn_node_types = cfg["function_nodes"]
-
-    target_node = None
-
-    def walk(node):
-        nonlocal target_node
-        if target_node is not None:
-            return
-        if node.type in fn_node_types:
-            for child in node.children:
-                if child.type == "identifier":
-                    name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-                    if name == fn_name:
-                        target_node = node
-                        return
-            # Arrow functions: check parent variable_declarator for the name
-            parent = node.parent
-            if parent and parent.type == "variable_declarator":
-                for child in parent.children:
-                    if child.type == "identifier":
-                        name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-                        if name == fn_name:
-                            target_node = node
-                            return
-        for child in node.children:
-            walk(child)
-
-    walk(tree.root_node)
-
-    if target_node is None:
-        return False, "", f"Function `{fn_name}` not found in source"
-
-    # For arrow functions, splice the full const/let declaration so the
-    # replacement returned by the LLM matches what the LLM was shown
-    if target_node.type == "arrow_function":
-        parent = target_node.parent
-        if parent and parent.type == "variable_declarator":
-            gp = parent.parent
-            if gp and gp.type in ("lexical_declaration", "variable_declaration"):
-                target_node = gp
-
     helper_sources = [h["source"] for h in helpers if h.get("source")]
     helpers_block = ("\n\n".join(helper_sources) + "\n\n") if helper_sources else ""
-
-    before = source_bytes[:target_node.start_byte].decode("utf-8", errors="replace")
-    after = source_bytes[target_node.end_byte:].decode("utf-8", errors="replace")
-    patched = before + helpers_block + replacement + after
-
-    return True, patched, ""
+    source_bytes = current_code.encode("utf-8")
+    before = source_bytes[:splice_start].decode("utf-8", errors="replace")
+    after = source_bytes[splice_end:].decode("utf-8", errors="replace")
+    return True, before + helpers_block + replacement + after, ""
 
 
 def _apply_line_replacement(
@@ -197,7 +144,9 @@ def validation_node(state: PipelineState) -> dict:
         ok, patched_code, err = _apply_line_replacement(current_code, fn_start, fn_end, replacement)
         syntax_target = patched_code
     elif fn_name:
-        ok, patched_code, err = _apply_replacement(current_code, language, fn_name, replacement, helpers)
+        splice_start = fn["start_byte"]
+        splice_end = fn["end_byte"]
+        ok, patched_code, err = _apply_replacement(current_code, replacement, helpers, splice_start, splice_end)
         syntax_target = replacement
     else:
         patched_code = replacement

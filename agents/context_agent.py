@@ -182,7 +182,9 @@ def _extract_functions_ts(
                 name = _node_name(node, source_bytes)
                 key = (name, start_line)
                 if key not in seen:
-                    # For arrow functions, include the full const/let declaration
+                    # Walk up from the function node to the outermost statement-level node:
+                    # arrow_function → lexical_declaration (const/let), then either
+                    # case stops at export_statement if the declaration is exported.
                     source_node = node
                     if node.type == "arrow_function":
                         parent = node.parent
@@ -190,6 +192,8 @@ def _extract_functions_ts(
                             gp = parent.parent
                             if gp and gp.type in ("lexical_declaration", "variable_declaration"):
                                 source_node = gp
+                    if source_node.parent and source_node.parent.type == "export_statement":
+                        source_node = source_node.parent
                     seen[key] = {
                         "name": name,
                         "start": source_node.start_point[0] + 1,
@@ -197,6 +201,8 @@ def _extract_functions_ts(
                         "source": source_bytes[source_node.start_byte:source_node.end_byte].decode(
                             "utf-8", errors="replace"
                         ),
+                        "start_byte": source_node.start_byte,
+                        "end_byte": source_node.end_byte,
                     }
         for child in node.children:
             walk(child)

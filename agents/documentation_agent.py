@@ -144,7 +144,8 @@ def _insert_docstring(source: str, language: str, fn_name: str, docstring: str) 
     if node is None:
         return source   # function not found; leave untouched
 
-    # For arrow functions assigned to variables, anchor on the declaration not the function
+    # Walk up to the outermost statement-level node, mirroring context_agent's extraction:
+    # arrow_function → lexical_declaration, then either stops or walks up to export_statement.
     anchor = node
     if node.type == "arrow_function":
         parent = node.parent
@@ -152,6 +153,8 @@ def _insert_docstring(source: str, language: str, fn_name: str, docstring: str) 
             grandparent = parent.parent
             if grandparent and grandparent.type in ("lexical_declaration", "variable_declaration"):
                 anchor = grandparent
+    if anchor.parent and anchor.parent.type == "export_statement":
+        anchor = anchor.parent
 
     has_doc, doc_start, doc_end = _has_existing_docstring(anchor, source_bytes, language)
 
