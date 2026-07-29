@@ -201,7 +201,7 @@ Function:
 {source}
 """
 
-_CHANGELOG_SYSTEM = "You produce concise conventional-commit messages. No prose."
+_CHANGELOG_SYSTEM = "You are a software engineer. You produce concise conventional-commit messages. No prose."
 _CHANGELOG_USER = """\
 Write a single conventional-commit message for this fix.
 Format: fix(<filename>): <one sentence>

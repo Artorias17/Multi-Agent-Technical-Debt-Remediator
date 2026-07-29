@@ -10,3 +10,8 @@ wheels/
 .venv
 data*/
 .env
+
+# Latex files
+*.tex
+*.cls
+*.bib

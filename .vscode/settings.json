@@ -6,5 +6,8 @@
     "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.formatOnSave": true
   },
-  "black-formatter.args": ["--line-length", "88"]
+  "black-formatter.args": ["--line-length", "88"],
+  "[latex]": {
+    "editor.wordWrap": "on"
+  }
 }
