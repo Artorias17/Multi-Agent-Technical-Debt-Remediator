@@ -11,6 +11,10 @@ wheels/
 data*/
 .env
 
+# Run artifacts (distributed via releases, not source)
+checkpoint/
+results/
+
 # Latex files
 *.tex
 *.cls
