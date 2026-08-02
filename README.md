@@ -80,6 +80,12 @@ python run.py --report <report.json> [--project-dir path/to/repo]
 
 Runs are checkpointed per issue, so an interrupted run resumes where it stopped when re-invoked with the same report.
 
+To keep a log of a run, pipe the output through `tee`:
+
+```bash
+python run.py --report <report.json> 2>&1 | tee logs/run.log
+```
+
 ## Language support
 
 Function extraction and patching are language-aware through tree-sitter. TypeScript and JavaScript are tested in the thesis. Grammars for Python, Java and C# are registered as well but untested. Adding another language mainly means registering its grammar and function node types.
