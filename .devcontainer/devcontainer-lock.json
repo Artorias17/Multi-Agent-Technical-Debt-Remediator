@@ -1,14 +1,14 @@
 {
   "features": {
-    "ghcr.io/cirolosapio/devcontainers-features/alpine-bash:0": {
-      "version": "0.0.2",
-      "resolved": "ghcr.io/cirolosapio/devcontainers-features/alpine-bash@sha256:9098c6b0bc75c850bb1cf455d39a26fcd23d14397a13312af8c35b59369995c0",
-      "integrity": "sha256:9098c6b0bc75c850bb1cf455d39a26fcd23d14397a13312af8c35b59369995c0"
+    "ghcr.io/cirolosapio/devcontainers-features/alpine-bash:": {
+      "version": "0.0.3",
+      "resolved": "ghcr.io/cirolosapio/devcontainers-features/alpine-bash@sha256:36cab39fa6859980ba9ac31e52737f855612bb18707222c92fef1441b29fd634",
+      "integrity": "sha256:36cab39fa6859980ba9ac31e52737f855612bb18707222c92fef1441b29fd634"
     },
     "ghcr.io/cirolosapio/devcontainers-features/alpine-git:0": {
-      "version": "0.0.1",
-      "resolved": "ghcr.io/cirolosapio/devcontainers-features/alpine-git@sha256:8d78c523e728b2cf99232eca582f0ee09efba2b4c9df77c52886d9e9a2933265",
-      "integrity": "sha256:8d78c523e728b2cf99232eca582f0ee09efba2b4c9df77c52886d9e9a2933265"
+      "version": "0.0.2",
+      "resolved": "ghcr.io/cirolosapio/devcontainers-features/alpine-git@sha256:b7cb46a1fe683282d0da6e48494a4ab8210acce19f05ee0c0660fc89a12f205a",
+      "integrity": "sha256:b7cb46a1fe683282d0da6e48494a4ab8210acce19f05ee0c0660fc89a12f205a"
     }
   }
 }
