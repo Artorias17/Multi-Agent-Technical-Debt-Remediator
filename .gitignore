@@ -15,6 +15,7 @@ data*/
 checkpoint/
 results/
 logs/
+*.tar.gz
 
 # Latex files
 *.tex
