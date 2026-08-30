@@ -2,7 +2,7 @@
 
 A privacy-focused, agentic AI workflow that automatically remediates code-level technical debt using locally deployable open-weight language models. It reads a static analysis report from SonarQube, fixes the flagged issues through a multi-agent pipeline and opens a pull request for human review, all without sending any source code to a third party.
 
-This is the reference implementation for the Master's thesis *Privacy-Focused Agentic AI Workflow with Locally Deployable Language Models for Technical Debt Remediation in Software Systems* (University of Turku).
+This is the reference implementation for the Master's thesis [*Privacy-Focused Agentic AI Workflow with Locally Deployable Language Models for Technical Debt Remediation in Software Systems*](https://urn.fi/URN:NBN:fi-fe20260804115071) (University of Turku).
 
 ## How it works
 
@@ -104,6 +104,14 @@ Function extraction and patching are language-aware through tree-sitter. TypeScr
 ├── state.py         # shared pipeline state
 └── checkpoint.py    # per-issue checkpoint and resume
 ```
+
+## Citation
+
+If you use or build on this work, please cite the thesis:
+
+> A. Roy, "Privacy-Focused Agentic AI Workflow with Locally Deployable Language Models for Technical Debt Remediation in Software Systems," M.S. thesis, Dept. of Computing, Univ. of Turku, Turku, Finland, 2026. [Online]. Available: https://urn.fi/URN:NBN:fi-fe20260804115071
+
+A `CITATION.cff` file is included, so GitHub's "Cite this repository" button works too.
 
 ## License
 

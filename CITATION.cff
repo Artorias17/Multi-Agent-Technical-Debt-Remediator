@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use or build on this software, please cite the associated Master's thesis."
+title: "Multi-Agent Technical Debt Remediator"
+authors:
+  - family-names: Roy
+    given-names: Abhishek
+license: MIT
+repository-code: "https://github.com/Artorias17/Multi-Agent-Technical-Debt-Remediator"
+preferred-citation:
+  type: thesis
+  title: "Privacy-Focused Agentic AI Workflow with Locally Deployable Language Models for Technical Debt Remediation in Software Systems"
+  authors:
+    - family-names: Roy
+      given-names: Abhishek
+  year: 2026
+  institution:
+    name: "University of Turku"
+  thesis-type: "Master's thesis"
+  url: "https://urn.fi/URN:NBN:fi-fe20260804115071"
